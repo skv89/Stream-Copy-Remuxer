@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+work/
+qa/
+release-stream-copy-remuxer-v*/
+Stream-Copy-Remuxer-v*-Windows-x64.zip
+slp_benchmarks/
+slp_high_vram_override/logs/*.jsonl
+slp_high_vram_override/logs/*-launch.json
