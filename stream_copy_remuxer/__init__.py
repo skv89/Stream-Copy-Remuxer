@@ -1,3 +1,3 @@
-"""Safe, no-reencode container remuxing for Windows."""
+"""Safe batch remuxing and compatibility-focused video transcoding for Windows."""
 
-__version__ = "1.3.2"
+__version__ = "1.4.1"

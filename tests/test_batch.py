@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from stream_copy_remuxer.encoding import H264_SOFTWARE_PROFILE_KEY, PRORES_PROFILE_KEY
 from stream_copy_remuxer.batch import (
     BatchItem,
     allocate_output_paths,
@@ -97,6 +98,31 @@ class BatchModelTests(unittest.TestCase):
         )
         self.assertEqual(allocated["one"].suffix, ".mov")
         self.assertEqual(allocated["two"].suffix, ".mkv")
+
+    def test_output_allocation_uses_profile_specific_names_and_fixed_containers(self) -> None:
+        first = self.root / "one.mkv"
+        second = self.root / "two.mkv"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        allocated = allocate_output_paths(
+            (
+                BatchItem(
+                    "prores",
+                    first,
+                    "mov",
+                    video_encoding_key=PRORES_PROFILE_KEY,
+                ),
+                BatchItem(
+                    "h264",
+                    second,
+                    "mp4",
+                    video_encoding_key=H264_SOFTWARE_PROFILE_KEY,
+                    quality_value=17,
+                ),
+            )
+        )
+        self.assertEqual(allocated["prores"], self.root / "one_prores.mov")
+        self.assertEqual(allocated["h264"], self.root / "two_h264_x264.mp4")
 
     def test_container_and_codec_summaries_use_probe_data(self) -> None:
         source = self.root / "movie.avi"

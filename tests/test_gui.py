@@ -7,8 +7,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from stream_copy_remuxer.batch import STATE_COMPLETE
+from stream_copy_remuxer.batch import STATE_COMPLETE, STATE_READY
 from stream_copy_remuxer.drop_support import create_root
+from stream_copy_remuxer.encoding import (
+    COPY_PROFILE_KEY,
+    DNXHR_PROFILE_KEY,
+    ENCODING_LABEL_BY_KEY,
+    H264_NVENC_PROFILE_KEY,
+    H264_SOFTWARE_PROFILE_KEY,
+    PRORES_PROFILE_KEY,
+)
 from stream_copy_remuxer.ffmpeg_install import FFmpegRelease
 from stream_copy_remuxer.gui import (
     DESCRIPTION,
@@ -57,10 +65,11 @@ class GuiTests(unittest.TestCase):
             item_ids = tuple(app.items)
             self.assertEqual(len(item_ids), 2)
             self.assertTrue(all(item.container_key == "mp4" for item in app.items.values()))
+            self.assertIn("AVI", tuple(app.container_combo.cget("values")))
             app.queue_tree.selection_set(item_ids)
-            app.container_var.set("MOV")
+            app.container_var.set("AVI")
             app._container_changed()
-            self.assertTrue(all(item.container_key == "mov" for item in app.items.values()))
+            self.assertTrue(all(item.container_key == "avi" for item in app.items.values()))
             self.assertTrue(app.queue_tree.bind("<Delete>"))
             class ActiveWorker:
                 @staticmethod
@@ -77,6 +86,7 @@ class GuiTests(unittest.TestCase):
                     item.output is not None
                     and item.output.parent == item.source.parent
                     and item.output.stem.startswith(item.source.stem + "_remux")
+                    and item.output.suffix == ".avi"
                     for item in app.items.values()
                 )
             )
@@ -117,6 +127,7 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(str(app.destination_clear_button.cget("state")), "disabled")
             app._set_running(False)
             self.assertNotIn("output", tuple(app.queue_tree.cget("columns")))
+            self.assertIn("output_video", tuple(app.queue_tree.cget("columns")))
             self.assertIn("compatibility", tuple(app.queue_tree.cget("columns")))
             self.assertTrue(bool(app.queue_tree.column("status", "stretch")))
             self.assertGreaterEqual(
@@ -127,6 +138,107 @@ class GuiTests(unittest.TestCase):
             self.assertFalse(app.items)
             self.assertTrue(first.is_file())
             self.assertTrue(second.is_file())
+            app.close_for_test()
+            del app
+            del root
+            gc.collect()
+
+    def test_transcoding_profiles_quality_and_help_are_applied_per_selected_row(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="remux-gui-transcode-test-") as folder:
+            source = Path(folder) / "source.mkv"
+            source.write_bytes(b"inspected source")
+            root = create_root()
+            root.withdraw()
+            app = StreamCopyRemuxerApp(root, discover_toolchain(), check_ffmpeg_updates=False)
+            app.add_files((source,))
+            item_id = next(iter(app.items))
+            item = app.items[item_id]
+            item.media = make_probe(source)
+            item.state = STATE_READY
+            item.detail = "Ready"
+            app.queue_tree.selection_set(item_id)
+
+            self.assertEqual(app.quality_label.winfo_manager(), "")
+            self.assertEqual(app.quality_entry.winfo_manager(), "")
+            self.assertEqual(int(app.encoding_combo.grid_info()["columnspan"]), 5)
+
+            app.encoding_var.set(ENCODING_LABEL_BY_KEY[DNXHR_PROFILE_KEY])
+            app._encoding_changed()
+            self.assertEqual((item.video_encoding_key, item.container_key), (DNXHR_PROFILE_KEY, "mov"))
+            self.assertEqual(app.quality_label.winfo_manager(), "")
+            self.assertEqual(app.quality_entry.winfo_manager(), "")
+            self.assertEqual(int(app.encoding_combo.grid_info()["columnspan"]), 5)
+            app.encoding_var.set(ENCODING_LABEL_BY_KEY[COPY_PROFILE_KEY])
+            app._encoding_changed()
+            app.container_var.set("AVI")
+            app._container_changed()
+            self.assertEqual(item.container_key, "avi")
+
+            app.encoding_var.set(ENCODING_LABEL_BY_KEY[H264_SOFTWARE_PROFILE_KEY])
+            app._encoding_changed()
+            self.assertEqual(item.video_encoding_key, H264_SOFTWARE_PROFILE_KEY)
+            self.assertEqual(item.container_key, "mp4")
+            self.assertTrue(item.output and item.output.stem.startswith(source.stem + "_h264_x264"))
+            self.assertEqual(str(app.container_combo.cget("state")), "disabled")
+            self.assertEqual(app.quality_label_var.get(), "CRF (0–51):")
+            self.assertEqual(app.quality_label.winfo_manager(), "grid")
+            self.assertEqual(app.quality_entry.winfo_manager(), "grid")
+            self.assertEqual(int(app.encoding_combo.grid_info()["columnspan"]), 3)
+
+            app.quality_var.set("17")
+            app._quality_changed()
+            self.assertEqual(item.quality_value, 17)
+            app.quality_var.set("not-a-number")
+            app._quality_changed()
+            self.assertEqual(item.quality_value, 17)
+            self.assertIn("Quality input error", app.status_var.get())
+
+            app.quality_var.set("12")
+            app.encoding_var.set(ENCODING_LABEL_BY_KEY[H264_NVENC_PROFILE_KEY])
+            app._encoding_changed()
+            self.assertEqual(app.quality_label_var.get(), "CQ (0–51):")
+            self.assertEqual(item.video_encoding_key, H264_NVENC_PROFILE_KEY)
+
+            app.encoding_var.set(ENCODING_LABEL_BY_KEY[PRORES_PROFILE_KEY])
+            app._encoding_changed()
+            self.assertEqual((item.video_encoding_key, item.container_key), (PRORES_PROFILE_KEY, "mov"))
+            self.assertIn("ProRes 4444 XQ", app._output_video_text(item))
+            self.assertTrue(item.output and item.output.suffix == ".mov")
+            self.assertEqual(app.quality_label.winfo_manager(), "")
+            self.assertEqual(app.quality_entry.winfo_manager(), "")
+            self.assertEqual(int(app.encoding_combo.grid_info()["columnspan"]), 5)
+
+            app.show_encoding_help()
+            self.assertIsNotNone(app._encoding_help_window)
+            self.assertIsNotNone(app._encoding_help_text)
+            assert app._encoding_help_window is not None and app._encoding_help_text is not None
+            first_window = app._encoding_help_window
+            help_content = app._encoding_help_text.get("1.0", "end")
+            self.assertEqual(str(first_window.cget("background")).lower(), "#0b1724")
+            for phrase in (
+                "ProRes — source-aware MOV",
+                "DNxHR — source-aware MOV",
+                "H.264 x264",
+                "H.264 NVENC",
+                "HEVC x265",
+                "HEVC NVENC",
+                "AV1 SVT-AV1",
+                "AV1 NVENC",
+                "CRF / CQ GUIDE",
+                "lower",
+                "lossy",
+            ):
+                self.assertIn(phrase, help_content)
+            app.show_encoding_help()
+            self.assertIs(app._encoding_help_window, first_window)
+
+            app.encoding_var.set(ENCODING_LABEL_BY_KEY[COPY_PROFILE_KEY])
+            app._encoding_changed()
+            self.assertEqual(item.video_encoding_key, COPY_PROFILE_KEY)
+            self.assertEqual(item.container_key, "avi")
+            self.assertEqual(str(app.container_combo.cget("state")), "readonly")
+            self.assertEqual(app.quality_label.winfo_manager(), "")
+            self.assertEqual(app.quality_entry.winfo_manager(), "")
             app.close_for_test()
             del app
             del root

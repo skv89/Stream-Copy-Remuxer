@@ -17,12 +17,23 @@ from stream_copy_remuxer import __version__
 from stream_copy_remuxer.batch import run_batch_plans
 from stream_copy_remuxer.engine import RemuxEngine
 from stream_copy_remuxer.drop_support import create_root
+from stream_copy_remuxer.encoding import (
+    AV1_SOFTWARE_PROFILE_KEY,
+    COPY_PROFILE_KEY,
+    DNXHR_PROFILE_KEY,
+    ENCODING_PROFILES,
+    H264_NVENC_PROFILE_KEY,
+    H264_SOFTWARE_PROFILE_KEY,
+    HEVC_SOFTWARE_PROFILE_KEY,
+    PRORES_PROFILE_KEY,
+    encoder_availability,
+)
 from stream_copy_remuxer.gui import (
     StreamCopyRemuxerApp,
     run_layout_scaling_self_test,
     run_withdrawn_gui_self_test,
 )
-from stream_copy_remuxer.models import Toolchain
+from stream_copy_remuxer.models import CONTAINER_PROFILES, RemuxPlan, Toolchain
 from stream_copy_remuxer.planning import PlanError, build_remux_plan
 from stream_copy_remuxer.probe import probe_media
 from stream_copy_remuxer.tools import CREATE_NO_WINDOW, discover_toolchain
@@ -93,6 +104,7 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
         destination.mkdir()
         output = destination / "ffv1-remux.mp4"
         second_output = destination / "mpeg4-remux.mkv"
+        avi_output = destination / "mpeg4-remux.avi"
         subtitle_output = destination / "ffv1-subrip-compatible-remux.mp4"
         video_only_output = destination / "ffv1-video-only-remux.mp4"
         generate = [
@@ -103,7 +115,7 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=160x90:rate=25:duration=1",
+            "testsrc2=size=320x180:rate=25:duration=1",
             "-f",
             "lavfi",
             "-i",
@@ -297,6 +309,7 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
             checks["strict_subrip_mp4_blocked_before_ffmpeg"] = False
         plan = build_remux_plan(source_probe, output, "mp4", "av")
         second_plan = build_remux_plan(second_source_probe, second_output, "mkv", "av")
+        avi_plan = build_remux_plan(second_source_probe, avi_output, "avi", "av")
         subtitle_plan = build_remux_plan(
             subtitle_source_probe,
             subtitle_output,
@@ -323,15 +336,16 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
             (
                 ("ffv1", plan),
                 ("avi", second_plan),
+                ("avi-output", avi_plan),
                 ("subrip", subtitle_plan),
                 ("video-only", video_only_plan),
             ),
             cancel_event=threading.Event(),
         )
-        checks["batch_four_plans_complete"] = (
-            batch.completed == 4 and batch.failed == 0 and not batch.canceled and len(batch.results) == 4
+        checks["batch_five_plans_complete"] = (
+            batch.completed == 5 and batch.failed == 0 and not batch.canceled and len(batch.results) == 5
         )
-        if not checks["batch_four_plans_complete"]:
+        if not checks["batch_five_plans_complete"]:
             observations["batch_failures"] = list(batch.failures)
             return {
                 "schema": 1,
@@ -341,10 +355,11 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
                 "checks": checks,
                 "observations": observations,
             }
-        result, second_result, subtitle_result, video_only_result = batch.results
+        result, second_result, avi_result, subtitle_result, video_only_result = batch.results
         checks["common_destination_outputs"] = (
             result.output.parent == destination
             and second_result.output.parent == destination
+            and avi_result.output.parent == destination
             and subtitle_result.output.parent == destination
             and video_only_result.output.parent == destination
         )
@@ -355,6 +370,8 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
         checks["report_exists"] = result.report.is_file()
         checks["second_output_exists"] = second_result.output.is_file()
         checks["second_report_exists"] = second_result.report.is_file()
+        checks["avi_output_exists"] = avi_result.output.is_file()
+        checks["avi_report_exists"] = avi_result.report.is_file()
         checks["compatible_output_exists"] = subtitle_result.output.is_file()
         checks["compatible_report_exists"] = subtitle_result.report.is_file()
         checks["video_only_output_exists"] = video_only_result.output.is_file()
@@ -372,6 +389,12 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
         )
         checks["second_stream_copy_command"] = (
             "-c" in second_result.command and "copy" in second_result.command
+        )
+        checks["avi_stream_copy_command"] = (
+            "-c" in avi_result.command
+            and avi_result.command[avi_result.command.index("-c") + 1] == "copy"
+            and "-f" in avi_result.command
+            and avi_result.command[avi_result.command.index("-f") + 1] == "avi"
         )
         compatible_maps = [
             subtitle_result.command[index + 1]
@@ -409,6 +432,7 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
         )
         checks["verification_passed"] = result.verification.passed
         checks["second_verification_passed"] = second_result.verification.passed
+        checks["avi_output_verification_passed"] = avi_result.verification.passed
         checks["compatible_verification_passed"] = subtitle_result.verification.passed
         checks["video_only_verification_passed"] = video_only_result.verification.passed
         checks["compatible_output_omits_subrip"] = (
@@ -429,8 +453,18 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
             and second_result.output_probe.audio_streams[0].codec_name
             == second_source_probe.audio_streams[0].codec_name
         )
+        checks["avi_output_codecs_preserved"] = bool(
+            avi_result.output_probe.video_streams
+            and avi_result.output_probe.audio_streams
+            and avi_result.output_probe.video_streams[0].codec_name
+            == second_source_probe.video_streams[0].codec_name
+            and avi_result.output_probe.audio_streams[0].codec_name
+            == second_source_probe.audio_streams[0].codec_name
+        )
         checks["multiple_output_containers"] = (
-            result.output.suffix.lower() == ".mp4" and second_result.output.suffix.lower() == ".mkv"
+            result.output.suffix.lower() == ".mp4"
+            and second_result.output.suffix.lower() == ".mkv"
+            and avi_result.output.suffix.lower() == ".avi"
         )
         checks["source_unchanged"] = (
             source_stat.st_size == source_after.st_size
@@ -466,7 +500,102 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
             == ["audio", "subtitle"]
             and video_only_report.get("stream_selection", {}).get("omissions_are_intentional") is True
         )
-        checks["no_partial_files"] = not any("partial" in item.name or "preflight" in item.name for item in root.iterdir())
+
+        software_cases = (
+            (PRORES_PROFILE_KEY, "mov", "prores", "yuv444p12le", None),
+            (DNXHR_PROFILE_KEY, "mov", "dnxhd", "yuv444p10le", None),
+            (H264_SOFTWARE_PROFILE_KEY, "mp4", "h264", "yuv420p", 35),
+            (HEVC_SOFTWARE_PROFILE_KEY, "mp4", "hevc", "yuv444p12le", 35),
+            (AV1_SOFTWARE_PROFILE_KEY, "mp4", "av1", "yuv420p10le", 45),
+        )
+        transcode_plans: list[tuple[str, RemuxPlan]] = []
+        for profile_key, container_key, _codec, _pixel_format, quality in software_cases:
+            transcode_output = destination / f"self-test-{profile_key}.{container_key}"
+            transcode_plans.append(
+                (
+                    profile_key,
+                    build_remux_plan(
+                        source_probe,
+                        transcode_output,
+                        container_key,
+                        "av",
+                        video_encoding_key=profile_key,
+                        quality=quality,
+                        enforce_space=False,
+                    ),
+                )
+            )
+        transcode_batch = run_batch_plans(
+            toolchain,
+            tuple(transcode_plans),
+            cancel_event=threading.Event(),
+        )
+        checks["software_transcode_profiles_complete"] = (
+            transcode_batch.completed == len(software_cases)
+            and transcode_batch.failed == 0
+            and not transcode_batch.canceled
+            and len(transcode_batch.results) == len(software_cases)
+        )
+        observations["software_transcode_batch"] = {
+            "completed": transcode_batch.completed,
+            "failed": transcode_batch.failed,
+            "canceled": transcode_batch.canceled,
+            "failures": list(transcode_batch.failures),
+        }
+        if checks["software_transcode_profiles_complete"]:
+            for case, transcode_result in zip(software_cases, transcode_batch.results, strict=True):
+                profile_key, _container_key, expected_codec, expected_pixel_format, _quality = case
+                output_video = transcode_result.output_probe.video_streams[0]
+                checks[f"{profile_key}_verified"] = (
+                    transcode_result.verification.passed
+                    and output_video.codec_name == expected_codec
+                    and output_video.pixel_format == expected_pixel_format
+                    and bool(transcode_result.output_probe.audio_streams)
+                    and transcode_result.output.with_suffix(
+                        transcode_result.output.suffix + ".transcode.json"
+                    ).is_file()
+                )
+        else:
+            for profile_key, _container_key, _codec, _pixel_format, _quality in software_cases:
+                checks[f"{profile_key}_verified"] = False
+
+        nvenc_plan = build_remux_plan(
+            source_probe,
+            destination / "self-test-h264-nvenc.mp4",
+            "mp4",
+            "av",
+            video_encoding_key=H264_NVENC_PROFILE_KEY,
+            quality=12,
+            enforce_space=False,
+        )
+        nvenc_command = RemuxEngine(toolchain).build_command(
+            nvenc_plan,
+            nvenc_plan.partial_output,
+        )
+        requested_nvenc_pairs = {
+            "-preset:v:0": "p7",
+            "-tune:v:0": "hq",
+            "-rc:v:0": "vbr",
+            "-cq:v:0": "12",
+            "-b:v:0": "0",
+            "-multipass:v:0": "fullres",
+            "-bf:v:0": "4",
+            "-b_ref_mode:v:0": "middle",
+            "-rc-lookahead:v:0": "27",
+            "-lookahead_level:v:0": "3",
+            "-spatial-aq:v:0": "0",
+            "-temporal-aq:v:0": "1",
+        }
+        checks["h264_nvenc_exact_requested_command"] = all(
+            flag in nvenc_command
+            and nvenc_command[nvenc_command.index(flag) + 1] == expected
+            for flag, expected in requested_nvenc_pairs.items()
+        )
+        observations["h264_nvenc_command"] = list(nvenc_command)
+        checks["no_partial_files"] = not any(
+            item.is_file() and ("partial" in item.name or "preflight" in item.name)
+            for item in root.rglob("*")
+        )
         observations["output_probe"] = result.output_probe.to_dict()
         observations["second_output_probe"] = second_result.output_probe.to_dict()
         observations["compatible_output_probe"] = subtitle_result.output_probe.to_dict()
@@ -492,16 +621,29 @@ def run_self_test(toolchain: Toolchain) -> dict[str, object]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Remux media containers using FFmpeg stream copy only.")
+    parser = argparse.ArgumentParser(
+        description="Batch-remux media with stream copy or transcode video using high-quality compatibility profiles."
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--self-test", action="store_true", help="Run the bounded GUI and FFV1/MP4 integration self-test.")
     mode.add_argument("--dependency-check", action="store_true", help="Report detected FFmpeg and FFprobe.")
     mode.add_argument("--probe", metavar="MEDIA", type=Path, help="Print a JSON media probe.")
-    mode.add_argument("--remux", metavar="MEDIA", type=Path, help="Run a command-line stream-copy remux.")
+    mode.add_argument("--remux", metavar="MEDIA", type=Path, help="Run a command-line remux or video transcode.")
     parser.add_argument("--open", metavar="MEDIA", type=Path, help="Open this source when the GUI starts.")
     parser.add_argument("--output", type=Path, help="Output media for --remux, or JSON for a diagnostic mode.")
-    parser.add_argument("--container", choices=("mp4", "mov", "mkv"), default="mp4")
+    parser.add_argument("--container", choices=tuple(CONTAINER_PROFILES), default="mp4")
     parser.add_argument("--stream-mode", choices=("av", "video", "compatible", "all"), default="av")
+    parser.add_argument(
+        "--video-encoding",
+        choices=tuple(ENCODING_PROFILES),
+        default=COPY_PROFILE_KEY,
+        help="Video output profile; defaults to packet-preserving stream copy.",
+    )
+    parser.add_argument(
+        "--quality",
+        type=int,
+        help="CRF or CQ for profiles that use one; defaults to the profile's Ultra HQ value of 12.",
+    )
     parser.add_argument("--ffmpeg", type=Path, help="Explicit ffmpeg.exe; paired ffprobe.exe is preferred.")
     parser.add_argument("--ffprobe", type=Path, help="Explicit ffprobe.exe.")
     return parser
@@ -552,6 +694,14 @@ def main(argv: list[str] | None = None) -> int:
                 "ffprobe": str(toolchain.ffprobe) if toolchain.ffprobe else None,
                 "ffmpeg_version": toolchain.ffmpeg_version,
                 "ffprobe_version": toolchain.ffprobe_version,
+                "video_encoders": sorted(toolchain.video_encoders),
+                "video_profiles": {
+                    key: {
+                        "available": encoder_availability(toolchain, key)[0],
+                        "detail": encoder_availability(toolchain, key)[1],
+                    }
+                    for key in ENCODING_PROFILES
+                },
             }
             write_json(payload, args.output)
             return 0 if toolchain.ready else 1
@@ -566,7 +716,14 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("--remux requires --output.")
             assert toolchain.ffprobe is not None
             source_probe = probe_media(toolchain.ffprobe, args.remux)
-            plan = build_remux_plan(source_probe, args.output, args.container, args.stream_mode)
+            plan = build_remux_plan(
+                source_probe,
+                args.output,
+                args.container,
+                args.stream_mode,
+                video_encoding_key=args.video_encoding,
+                quality=args.quality,
+            )
             result = RemuxEngine(toolchain).run(
                 plan,
                 on_status=(lambda text: print(text) if sys.stdout is not None else None),

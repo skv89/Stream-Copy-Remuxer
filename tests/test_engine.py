@@ -8,6 +8,11 @@ from pathlib import Path
 from types import MethodType
 
 from stream_copy_remuxer.engine import RemuxCancelled, RemuxEngine
+from stream_copy_remuxer.encoding import (
+    H264_NVENC_PROFILE_KEY,
+    H264_SOFTWARE_PROFILE_KEY,
+    PRORES_PROFILE_KEY,
+)
 from stream_copy_remuxer.models import Toolchain
 from stream_copy_remuxer.planning import build_remux_plan
 
@@ -82,6 +87,71 @@ class EngineCommandTests(unittest.TestCase):
         self.assertNotIn("0:2", mapped)
         self.assertNotIn("0", mapped)
         self.assertEqual(command[command.index("-c") + 1], "copy")
+
+    def test_h264_software_command_overrides_video_only_and_uses_placebo_8_bit(self) -> None:
+        plan = build_remux_plan(
+            make_probe(self.source),
+            self.root / "h264.mp4",
+            "mp4",
+            "av",
+            video_encoding_key=H264_SOFTWARE_PROFILE_KEY,
+            quality=8,
+        )
+        command = self.engine.build_command(plan, plan.partial_output)
+        self.assertNotIn("-c", command)
+        self.assertEqual(command[command.index("-c:1") + 1], "copy")
+        expected = {
+            "-c:v:0": "libx264",
+            "-pix_fmt:v:0": "yuv420p",
+            "-preset:v:0": "placebo",
+            "-crf:v:0": "8",
+            "-profile:v:0": "high",
+        }
+        for option, value in expected.items():
+            self.assertEqual(command[command.index(option) + 1], value)
+
+    def test_h264_nvenc_command_contains_every_requested_setting(self) -> None:
+        plan = build_remux_plan(
+            make_probe(self.source),
+            self.root / "h264-nvenc.mp4",
+            "mp4",
+            "av",
+            video_encoding_key=H264_NVENC_PROFILE_KEY,
+            quality=11,
+        )
+        command = self.engine.build_command(plan, plan.partial_output)
+        expected = {
+            "-c:v:0": "h264_nvenc",
+            "-pix_fmt:v:0": "yuv420p",
+            "-preset:v:0": "p7",
+            "-tune:v:0": "hq",
+            "-rc:v:0": "vbr",
+            "-cq:v:0": "11",
+            "-b:v:0": "0",
+            "-multipass:v:0": "fullres",
+            "-bf:v:0": "4",
+            "-b_ref_mode:v:0": "middle",
+            "-rc-lookahead:v:0": "27",
+            "-lookahead_level:v:0": "3",
+            "-spatial-aq:v:0": "0",
+            "-temporal-aq:v:0": "1",
+        }
+        for option, value in expected.items():
+            self.assertEqual(command[command.index(option) + 1], value)
+
+    def test_source_aware_prores_command_uses_resolved_profile_and_tag(self) -> None:
+        plan = build_remux_plan(
+            make_probe(self.source),
+            self.root / "prores.mov",
+            "mov",
+            "video",
+            video_encoding_key=PRORES_PROFILE_KEY,
+        )
+        command = self.engine.build_command(plan, plan.partial_output)
+        self.assertEqual(command[command.index("-c:v:0") + 1], "prores_ks")
+        self.assertEqual(command[command.index("-pix_fmt:v:0") + 1], "yuv444p10le")
+        self.assertEqual(command[command.index("-profile:v:0") + 1], "5")
+        self.assertEqual(command[command.index("-tag:v:0") + 1], "ap4x")
 
     def test_cancellation_removes_application_temporary_file(self) -> None:
         cancel_event = threading.Event()

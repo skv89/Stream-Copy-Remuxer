@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
 
 from PIL import Image
 
 from stream_copy_remuxer.batch import BatchItem, STATE_COMPLETE, STATE_READY
-from stream_copy_remuxer.drop_support import create_root
+from stream_copy_remuxer.encoding import (
+    COPY_PROFILE_KEY,
+    DNXHR_PROFILE_KEY,
+    H264_NVENC_PROFILE_KEY,
+    H264_SOFTWARE_PROFILE_KEY,
+    HEVC_SOFTWARE_PROFILE_KEY,
+    PRORES_PROFILE_KEY,
+)
 from stream_copy_remuxer.gui import StreamCopyRemuxerApp
 from stream_copy_remuxer.models import MediaProbe, StreamInfo
 from stream_copy_remuxer.planning import suggest_output
@@ -164,12 +172,20 @@ def preview_probe(path: Path, *, subtitle: bool, prores: bool = False) -> MediaP
     )
 
 
-def render(output: Path) -> None:
+def render(output: Path, help_output: Path | None = None) -> None:
     desktop_api, desktop = create_hidden_desktop()
-    root = create_root()
+    # A visual preview does not exercise drag-and-drop.  Using a plain Tk root
+    # keeps this renderer independent of the development interpreter's tkdnd
+    # DLL, while the packaged self-test still validates real TkDND loading.
+    root = tk.Tk()
     root.withdraw()
     root.tk.call("tk", "scaling", 4.0 / 3.0)
     app = StreamCopyRemuxerApp(root, discover_toolchain(), check_ffmpeg_updates=False)
+    # The packaged build exercises TkDND separately.  Keep the visual fixture
+    # representative of the released interface instead of the plain-Tk
+    # renderer used to capture it.
+    app.queue_hint_var.set("Drag and drop media files here, or use Add files")
+    app._clear_log()
     sample_names = (
         "06_Davinci_Temporal_NR_cropped.mkv",
         "07 Journey to the West 西游记 FFV1 cropped.mkv",
@@ -178,28 +194,56 @@ def render(output: Path) -> None:
         "10_Davinci_Temporal_NR_cropped.mkv",
         "11 ProRes restoration preview.mov",
     )
+    profile_cases = (
+        (COPY_PROFILE_KEY, "mp4", None),
+        (PRORES_PROFILE_KEY, "mov", None),
+        (DNXHR_PROFILE_KEY, "mov", None),
+        (H264_SOFTWARE_PROFILE_KEY, "mp4", 12),
+        (H264_NVENC_PROFILE_KEY, "mp4", 12),
+        (HEVC_SOFTWARE_PROFILE_KEY, "mp4", 12),
+    )
     for index, name in enumerate(sample_names, start=1):
         source = Path(r"D:\Chinese Videos\Journey To The West") / name
         item_id = f"preview-{index}"
-        item = BatchItem(item_id=item_id, source=source, container_key="mp4")
+        encoding_key, container_key, quality = profile_cases[index - 1]
+        item = BatchItem(
+            item_id=item_id,
+            source=source,
+            container_key=container_key,
+            video_encoding_key=encoding_key,
+            quality_value=quality,
+        )
         item.media = preview_probe(source, subtitle=index in {2, 4}, prores=index == 6)
-        item.output = suggest_output(source, "mp4")
+        item.output = suggest_output(
+            source,
+            container_key,
+            video_encoding_key=encoding_key,
+        )
         item.state = STATE_COMPLETE if index <= 2 else STATE_READY
         item.detail = "Complete — verified" if index <= 2 else "Ready"
         app.items[item_id] = item
         app._item_order.append(item_id)
         app.queue_tree.insert("", "end", iid=item_id, values=app._row_values(item), tags=(item.state,))
     app.queue_tree.selection_set(("preview-2", "preview-3", "preview-4"))
+    app._selection_changed()
     app.status_var.set("Inspection complete — 6 files ready")
-    app.metrics_var.set("Outputs will be written beside each source with the _remux suffix.")
+    app.metrics_var.set("Stream copy and compatibility transcodes are ready; outputs remain beside each source.")
     app._append_log("Added 6 files to the queue.")
-    app._append_log("FFprobe inspection completed. No source files were modified.")
+    app._append_log("FFprobe inspection completed. Transcoding profiles are explicitly labeled as lossy.")
     app._update_controls()
     root.geometry("+20+20")
     root.deiconify()
     root.update_idletasks()
     root.update()
     capture_window(int(root.winfo_id()), output)
+    if help_output is not None:
+        app.queue_tree.selection_set("preview-4")
+        app._selection_changed()
+        app.show_encoding_help()
+        assert app._encoding_help_window is not None
+        app._encoding_help_window.update_idletasks()
+        app._encoding_help_window.update()
+        capture_window(int(app._encoding_help_window.winfo_id()), help_output)
     app.close_for_test()
     desktop_api.CloseDesktop(wintypes.HANDLE(desktop))
 
@@ -207,8 +251,12 @@ def render(output: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
+    parser.add_argument("--help-output", type=Path)
     args = parser.parse_args()
-    render(args.output.resolve(strict=False))
+    render(
+        args.output.resolve(strict=False),
+        args.help_output.resolve(strict=False) if args.help_output else None,
+    )
     return 0
 
 

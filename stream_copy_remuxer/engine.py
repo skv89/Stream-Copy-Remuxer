@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import threading
 import time
 import uuid
-from collections import Counter
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import __version__
+from .encoding import profile_for
 from .models import (
     ProgressUpdate,
     RemuxPlan,
@@ -115,7 +116,10 @@ class RemuxEngine:
             "-i",
             str(plan.source_probe.path),
         ]
-        if plan.stream_mode == "video":
+        if not plan.is_stream_copy:
+            for stream in plan.selected_source_streams:
+                command += ["-map", f"0:{stream.index}"]
+        elif plan.stream_mode == "video":
             command += ["-map", "0:v?"]
         elif plan.stream_mode == "av":
             command += ["-map", "0:v?", "-map", "0:a?"]
@@ -124,15 +128,14 @@ class RemuxEngine:
                 command += ["-map", f"0:{stream.index}"]
         else:
             command += ["-map", "0"]
-        command += [
-            "-map_metadata",
-            "0",
-            "-map_chapters",
-            "0",
-            "-c",
-            "copy",
-        ]
-        if plan.profile.key in {"mp4", "mov"}:
+        command += ["-map_metadata", "0", "-map_chapters", "0"]
+        if plan.is_stream_copy:
+            command += ["-c", "copy"]
+        else:
+            for output_index, stream in enumerate(plan.selected_source_streams):
+                if stream.codec_type != "video":
+                    command += [f"-c:{output_index}", "copy"]
+        if plan.is_stream_copy and plan.profile.key in {"mp4", "mov"}:
             selected_video = [
                 stream
                 for stream in plan.selected_source_streams
@@ -141,8 +144,15 @@ class RemuxEngine:
             for output_video_index, stream in enumerate(selected_video):
                 if stream.codec_name.lower() == "ffv1":
                     command += [f"-tag:v:{output_video_index}", "FFV1"]
+        elif not plan.is_stream_copy:
+            for resolved in plan.resolved_video_encodings:
+                specifier = f"v:{resolved.output_video_index}"
+                command += [f"-c:{specifier}", resolved.encoder_name]
+                command += [f"-pix_fmt:{specifier}", resolved.pixel_format]
+                for name, value in resolved.encoder_options:
+                    command += [f"-{name}:{specifier}", value]
         if preflight:
-            command += ["-t", "0.5"]
+            command += ["-t", "0.5" if plan.is_stream_copy else "1.0"]
         command += [
             "-max_muxing_queue_size",
             "4096",
@@ -356,6 +366,15 @@ class RemuxEngine:
         cancel_event = cancel_event or threading.Event()
         started_monotonic = time.monotonic()
         started_utc = datetime.now(timezone.utc)
+        if not plan.is_stream_copy:
+            required = {item.encoder_name for item in plan.resolved_video_encodings}
+            missing = sorted(required - set(self.toolchain.video_encoders)) if self.toolchain.video_encoders else []
+            if missing:
+                raise RemuxError(
+                    "The detected FFmpeg build does not expose the required video encoder(s): "
+                    + ", ".join(missing)
+                    + ". Install a current full FFmpeg build or choose another output mode."
+                )
         source_stat = plan.source_probe.path.stat()
         if (
             source_stat.st_size != plan.source_probe.size
@@ -370,7 +389,12 @@ class RemuxEngine:
             if owned.exists():
                 raise RemuxError(f"Unexpected application temporary-file conflict: {owned}")
         try:
-            _safe_callback(on_status, "Checking destination-container compatibility…")
+            _safe_callback(
+                on_status,
+                "Checking destination-container compatibility…"
+                if plan.is_stream_copy
+                else "Testing encoder, GPU (when required), and destination compatibility…",
+            )
             preflight = self._run_process(
                 preflight_command,
                 phase="preflight",
@@ -381,7 +405,7 @@ class RemuxEngine:
             )
             if preflight.returncode != 0:
                 raise ContainerCompatibilityError(
-                    f"The selected streams cannot be copied into {plan.profile.label}.\n\n"
+                    f"The selected media operation cannot create {plan.profile.label}.\n\n"
                     + self._failure_detail(preflight)
                 )
             if not plan.preflight_output.is_file() or plan.preflight_output.stat().st_size == 0:
@@ -393,47 +417,68 @@ class RemuxEngine:
                 raise ContainerCompatibilityError(
                     f"The {plan.profile.label} preflight output could not be read: {exc}"
                 ) from exc
-            selected_source = plan.selected_source_streams
-            selected_preflight = preflight_probe.selected_streams(
-                plan.stream_mode,
-                plan.profile.key,
+            preflight_verification = verify_remux(
+                plan.source_probe,
+                preflight_probe,
+                stream_mode=plan.stream_mode,
+                container_key=plan.profile.key,
+                resolved_video_encodings=plan.resolved_video_encodings,
+                check_timeline=False,
+                check_chapters=False,
             )
-            expected_preflight = Counter(stream.preservation_signature() for stream in selected_source)
-            actual_preflight = Counter(stream.preservation_signature() for stream in selected_preflight)
-            if expected_preflight != actual_preflight:
-                raise ContainerCompatibilityError(
-                    f"The {plan.profile.label} preflight did not preserve the selected stream codecs and properties. "
-                    f"Expected {dict(expected_preflight)}; actual {dict(actual_preflight)}."
+            if not preflight_verification.passed:
+                failures = "; ".join(
+                    f"{check.name}: {check.detail}"
+                    for check in preflight_verification.checks
+                    if not check.passed
                 )
-            if plan.profile.key in {"mp4", "mov"}:
-                missing_ffv1_index = [
-                    stream.index
-                    for stream in preflight_probe.video_streams
-                    if stream.codec_name.lower() == "ffv1" and not stream.frame_count
-                ]
-                if missing_ffv1_index:
-                    raise ContainerCompatibilityError(
-                        f"The {plan.profile.label} preflight retained FFV1 but did not expose an indexed frame count; "
-                        "this output would not address the Topaz startup problem."
-                    )
+                raise ContainerCompatibilityError(
+                    f"The {plan.profile.label} preflight did not produce the planned stream properties. {failures}"
+                )
+            measured_preflight_bytes = plan.preflight_output.stat().st_size
+            measured_preflight_duration = preflight_probe.duration or (0.5 if plan.is_stream_copy else 1.0)
             if not self._remove_owned(plan.preflight_output):
                 raise RemuxError(
                     f"Could not remove the container-preflight file: {plan.preflight_output}"
                 )
 
+            if not plan.is_stream_copy and plan.source_probe.duration and measured_preflight_duration > 0:
+                measured_estimate = int(
+                    measured_preflight_bytes
+                    * plan.source_probe.duration
+                    / measured_preflight_duration
+                    * 1.35
+                )
+                measured_estimate = max(measured_estimate, plan.estimated_output_bytes)
+                reserve = max(256 * 1024 * 1024, measured_estimate // 100)
+                available_now = shutil.disk_usage(plan.output.parent).free
+                if available_now < measured_estimate + reserve:
+                    raise RemuxError(
+                        "The disposable encoder preflight indicates that the destination may not have enough "
+                        "free space for this transcode. "
+                        f"Estimated requirement {measured_estimate + reserve:,} bytes; "
+                        f"available {available_now:,} bytes."
+                    )
+
             if cancel_event.is_set():
                 raise RemuxCancelled("Remux canceled; no final output was created.")
-            _safe_callback(on_status, "Stream-copying media (no re-encoding)…")
+            _safe_callback(
+                on_status,
+                "Stream-copying media (no re-encoding)…"
+                if plan.is_stream_copy
+                else "Transcoding video with the selected high-quality settings…",
+            )
             outcome = self._run_process(
                 command,
-                phase="remux",
+                phase="remux" if plan.is_stream_copy else "transcode",
                 duration=plan.source_probe.duration,
                 cancel_event=cancel_event,
                 on_progress=on_progress,
                 on_log=on_log,
             )
             if outcome.returncode != 0:
-                raise RemuxError("FFmpeg could not complete the remux.\n\n" + self._failure_detail(outcome))
+                operation = "remux" if plan.is_stream_copy else "transcode"
+                raise RemuxError(f"FFmpeg could not complete the {operation}.\n\n" + self._failure_detail(outcome))
             if not plan.partial_output.is_file() or plan.partial_output.stat().st_size == 0:
                 raise RemuxError("FFmpeg reported success but did not create a nonempty output.")
             if cancel_event.is_set():
@@ -446,6 +491,7 @@ class RemuxEngine:
                 output_probe,
                 stream_mode=plan.stream_mode,
                 container_key=plan.profile.key,
+                resolved_video_encodings=plan.resolved_video_encodings,
             )
             current_source_stat = plan.source_probe.path.stat()
             source_unchanged = (
@@ -471,16 +517,20 @@ class RemuxEngine:
                     f"• {check.name}: {check.detail}" for check in verification.checks if not check.passed
                 )
                 raise RemuxVerificationError(
-                    "The remux finished, but verification failed, so no final output was published.\n\n" + failures
+                    "FFmpeg finished, but verification failed, so no final output was published.\n\n" + failures
                 )
 
             finished_utc = datetime.now(timezone.utc)
             elapsed = time.monotonic() - started_monotonic
             report_payload: dict[str, object] = {
-                "schema": 1,
+                "schema": 2,
                 "application": "Stream Copy Remuxer",
                 "version": __version__,
-                "method": "FFmpeg stream copy; no decoding or re-encoding",
+                "method": (
+                    "FFmpeg stream copy; no decoding or re-encoding"
+                    if plan.is_stream_copy
+                    else "FFmpeg video transcode; selected non-video streams copied"
+                ),
                 "started_utc": started_utc.isoformat(),
                 "finished_utc": finished_utc.isoformat(),
                 "elapsed_seconds": elapsed,
@@ -488,6 +538,15 @@ class RemuxEngine:
                 "output": output_probe.to_dict(path=plan.output),
                 "destination_container": plan.profile.key,
                 "stream_mode": plan.stream_mode,
+                "video_encoding": {
+                    "profile_key": plan.video_encoding_key,
+                    "profile_label": profile_for(plan.video_encoding_key).label,
+                    "quality_value": plan.quality_value,
+                    "lossy": plan.is_lossy,
+                    "resolved_video_streams": [
+                        item.to_dict() for item in plan.resolved_video_encodings
+                    ],
+                },
                 "stream_selection": {
                     "selected_source_streams": [
                         stream.to_dict() for stream in plan.selected_source_streams
@@ -500,6 +559,7 @@ class RemuxEngine:
                 "compatibility_notes": list(plan.compatibility_notes),
                 "space": {
                     "available_bytes_at_plan_time": plan.available_bytes,
+                    "estimated_output_bytes": plan.estimated_output_bytes,
                     "required_bytes_estimate": plan.required_bytes,
                 },
                 "toolchain": {
@@ -522,7 +582,12 @@ class RemuxEngine:
             )
             output_probe = replace(output_probe, path=plan.output)
             _safe_callback(on_progress, ProgressUpdate("complete", elapsed, percent=100.0))
-            _safe_callback(on_status, "Remux complete and verified.")
+            _safe_callback(
+                on_status,
+                "Remux complete and verified."
+                if plan.is_stream_copy
+                else "Transcode complete and verified.",
+            )
             return RemuxResult(
                 output=plan.output,
                 report=plan.report_output,

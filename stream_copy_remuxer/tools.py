@@ -93,6 +93,41 @@ def tool_version(executable: Path | None, timeout: float = 20.0) -> str:
     return line
 
 
+def video_encoders(executable: Path | None, timeout: float = 20.0) -> frozenset[str]:
+    """Return video encoder names advertised by this exact FFmpeg executable."""
+
+    if executable is None:
+        return frozenset()
+    try:
+        result = subprocess.run(
+            [str(executable), "-hide_banner", "-encoders"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return frozenset()
+    if result.returncode != 0:
+        return frozenset()
+    found: set[str] = set()
+    for line in result.stdout.splitlines():
+        pieces = line.split()
+        if (
+            len(pieces) >= 2
+            and pieces[0].startswith("V")
+            and len(pieces[0]) == 6
+            and pieces[1] != "="
+        ):
+            found.add(pieces[1])
+    return frozenset(found)
+
+
 def _source_label(path: Path | None, root: Path) -> str:
     if path is None:
         return "Not found"
@@ -148,6 +183,7 @@ def discover_toolchain(
         source=_source_label(resolved_ffmpeg, root),
         ffmpeg_version=tool_version(resolved_ffmpeg),
         ffprobe_version=tool_version(resolved_ffprobe),
+        video_encoders=video_encoders(resolved_ffmpeg),
     )
 
 

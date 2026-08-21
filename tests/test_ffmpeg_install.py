@@ -224,7 +224,9 @@ class FFmpegInstallTests(unittest.TestCase):
             with patch("stream_copy_remuxer.tools.application_root", return_value=root), patch(
                 "stream_copy_remuxer.tools.tool_version",
                 side_effect=lambda path: f"ffmpeg version {path.parents[1].name}",
-            ), patch("stream_copy_remuxer.tools._which", return_value=None):
+            ), patch("stream_copy_remuxer.tools.video_encoders", return_value=frozenset()), patch(
+                "stream_copy_remuxer.tools._which", return_value=None
+            ):
                 toolchain = discover_toolchain()
             self.assertEqual(toolchain.ffmpeg, current / "ffmpeg.exe")
             self.assertEqual(toolchain.ffprobe, current / "ffprobe.exe")

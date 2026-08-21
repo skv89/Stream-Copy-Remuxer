@@ -1,12 +1,12 @@
 param(
-    [string]$Version = "1.3.2"
+    [string]$Version = "1.4.1"
 )
 
 $ErrorActionPreference = "Stop"
 $env:PYTHONNOUSERSITE = "1"
 $projectRoot = [IO.Path]::GetFullPath($PSScriptRoot)
 $buildPython = [IO.Path]::GetFullPath("C:\Users\Doug\Documents\ChatGPT\Video corrections\work\pyinstaller311-env\Scripts\python.exe")
-$workRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot "work\stream-copy-remuxer-v$Version-build13-onefile"))
+$workRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot "work\stream-copy-remuxer-v$Version-build16-onefile"))
 $env:PYTHONUSERBASE = [IO.Path]::GetFullPath((Join-Path $workRoot "python-userbase"))
 $buildRoot = [IO.Path]::GetFullPath((Join-Path $workRoot "pyinstaller-build"))
 $distRoot = [IO.Path]::GetFullPath((Join-Path $workRoot "pyinstaller-dist"))
@@ -148,6 +148,51 @@ if (-not $selfTestPayload.observations.gui.checks.compatible_confirmation_disclo
 if (-not $selfTestPayload.observations.gui.checks.video_only_confirmation_discloses_audio_omissions) {
     throw "The packaged executable did not disclose video-only audio omissions in confirmation text."
 }
+if (-not $selfTestPayload.observations.gui.checks.queue_columns) {
+    throw "The packaged executable did not expose the Output video queue column."
+}
+if (-not $selfTestPayload.observations.gui.checks.encoding_help_window_created) {
+    throw "The packaged executable did not create the encoding help popup."
+}
+if (-not $selfTestPayload.observations.gui.checks.encoding_help_window_reused) {
+    throw "The packaged executable did not reuse its encoding help popup."
+}
+if (-not $selfTestPayload.observations.gui.checks.encoding_help_is_high_contrast) {
+    throw "The packaged executable help popup did not pass the high-contrast style check."
+}
+if (-not $selfTestPayload.observations.gui.checks.encoding_help_covers_profiles_and_quality) {
+    throw "The packaged executable help popup omitted a video profile or CRF/CQ guidance."
+}
+if (-not $selfTestPayload.observations.gui.checks.x264_profile_applies_to_selected_rows) {
+    throw "The packaged executable did not apply the x264 profile and output naming to selected rows."
+}
+if (-not $selfTestPayload.observations.gui.checks.crf_applies_to_selected_rows) {
+    throw "The packaged executable did not apply CRF to selected rows."
+}
+if (-not $selfTestPayload.observations.gui.checks.invalid_quality_is_rejected_without_changing_rows) {
+    throw "The packaged executable did not reject invalid CRF/CQ safely."
+}
+if (-not $selfTestPayload.observations.gui.checks.prores_forces_mov_and_source_aware_resolution) {
+    throw "The packaged executable did not force MOV and resolve source-aware ProRes."
+}
+if (-not $selfTestPayload.observations.gui.checks.stream_copy_restored_after_profile_tests) {
+    throw "The packaged executable did not preserve stream copy as the default/reversible profile."
+}
+if (-not $selfTestPayload.observations.gui.checks.avi_stream_copy_container_available) {
+    throw "The packaged executable did not expose AVI for Stream Copy."
+}
+if (-not $selfTestPayload.observations.gui.checks.avi_stream_copy_applies_to_selected_rows) {
+    throw "The packaged executable did not apply AVI Stream Copy output to selected rows."
+}
+if (-not $selfTestPayload.observations.gui.checks.quality_controls_visible_for_crf_profile) {
+    throw "The packaged executable did not show Quality controls for a CRF encoder."
+}
+if (-not $selfTestPayload.observations.gui.checks.quality_controls_hidden_for_prores) {
+    throw "The packaged executable did not hide inapplicable Quality controls for ProRes."
+}
+if (-not $selfTestPayload.observations.gui.checks.quality_controls_hidden_for_stream_copy) {
+    throw "The packaged executable did not hide inapplicable Quality controls for Stream Copy."
+}
 if (-not $selfTestPayload.checks.bounded_input_analysis_before_source) {
     throw "The packaged executable did not apply the bounded input-analysis option before the source."
 }
@@ -178,6 +223,50 @@ if (-not $selfTestPayload.checks.video_only_output_has_only_ffv1_video) {
 if (-not $selfTestPayload.checks.video_only_report_discloses_audio_and_subrip_omissions) {
     throw "The packaged executable did not disclose video-only audio/SubRip omissions in its audit report."
 }
+if (-not $selfTestPayload.checks.avi_output_verification_passed) {
+    throw "The packaged executable did not create and verify an AVI Stream Copy output."
+}
+if (-not $selfTestPayload.checks.avi_output_codecs_preserved) {
+    throw "The packaged AVI Stream Copy output did not preserve the selected video/audio codecs."
+}
+if (-not $selfTestPayload.checks.software_transcode_profiles_complete) {
+    throw "The packaged executable did not complete all five real software transcode profiles."
+}
+foreach ($profileCheck in @(
+    "prores_source_aware_verified",
+    "dnxhr_source_aware_verified",
+    "h264_x264_placebo_verified",
+    "hevc_x265_veryslow_verified",
+    "av1_svt_p0_verified"
+)) {
+    if (-not $selfTestPayload.checks.$profileCheck) {
+        throw "The packaged executable failed software profile verification: $profileCheck"
+    }
+}
+if (-not $selfTestPayload.checks.h264_nvenc_exact_requested_command) {
+    throw "The packaged executable did not preserve every requested H.264 NVENC option."
+}
+
+$mainPreview = Join-Path $qaRoot "gui-main-preview.png"
+$helpPreview = Join-Path $qaRoot "gui-encoding-help-preview.png"
+Push-Location $projectRoot
+try {
+    & $buildPython -s -m scripts.render_gui_preview $mainPreview --help-output $helpPreview
+    if ($LASTEXITCODE -ne 0) {
+        throw "The hidden-desktop GUI preview renderer failed with exit code $LASTEXITCODE."
+    }
+}
+finally {
+    Pop-Location
+}
+foreach ($preview in @($mainPreview, $helpPreview)) {
+    if (-not (Test-Path -LiteralPath $preview -PathType Leaf)) {
+        throw "The GUI visual-QA preview was not created: $preview"
+    }
+    if ((Get-Item -LiteralPath $preview).Length -lt 10000) {
+        throw "The GUI visual-QA preview is unexpectedly small: $preview"
+    }
+}
 
 $warningSource = Join-Path $buildRoot "Stream Copy Remuxer\warn-Stream Copy Remuxer.txt"
 if (Test-Path -LiteralPath $warningSource -PathType Leaf) {
@@ -198,6 +287,24 @@ $manifest = [ordered]@{
     output_folder_opener = "Windows shell startfile"
     input_analyze_duration_microseconds = 10000000
     stream_modes = @("av", "video", "compatible", "all")
+    default_video_output = "copy"
+    stream_copy_output_containers = @("mp4", "mov", "mkv", "avi")
+    video_output_profiles = @(
+        "copy",
+        "prores_source_aware",
+        "dnxhr_source_aware",
+        "h264_x264_placebo",
+        "h264_nvenc_p7",
+        "hevc_x265_veryslow",
+        "hevc_nvenc_p7",
+        "av1_svt_p0",
+        "av1_nvenc_p7"
+    )
+    default_crf_cq = 12
+    source_aware_interchange_profiles = @("prores_source_aware", "dnxhr_source_aware")
+    packaged_real_software_transcode_profiles_verified = $true
+    h264_nvenc_requested_profile_command_verified = $true
+    gui_visual_qa_previews_generated = $true
     compatible_mode_mp4_mov_safe_subtitle_codecs = @("mov_text")
     details_log_rows = 10
     files = @(

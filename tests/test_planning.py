@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from stream_copy_remuxer.encoding import H264_SOFTWARE_PROFILE_KEY, PRORES_PROFILE_KEY
 from stream_copy_remuxer.models import StreamInfo
 from stream_copy_remuxer.planning import PlanError, build_remux_plan, suggest_output
 
@@ -112,6 +113,29 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan.selected_source_streams, probe.streams)
         self.assertFalse(plan.omitted_source_streams)
 
+    def test_avi_stream_copy_uses_avi_muxer_and_omits_extra_streams_in_compatible_mode(self) -> None:
+        probe = make_probe(
+            self.source,
+            streams=(
+                video_stream(index=0),
+                audio_stream(index=1),
+                subtitle_stream(index=2, codec="mov_text", language="eng"),
+                subtitle_stream(index=3, codec="subrip", language="chi"),
+            ),
+        )
+        plan = build_remux_plan(probe, self.root / "compatible.avi", "avi", "compatible")
+        self.assertEqual(plan.profile.muxer, "avi")
+        self.assertEqual([stream.index for stream in plan.selected_source_streams], [0, 1])
+        self.assertEqual([stream.index for stream in plan.omitted_source_streams], [2, 3])
+        self.assertIn("legacy compatibility container", " ".join(plan.compatibility_notes))
+        self.assertEqual(suggest_output(self.source, "avi"), self.root / "源 & source_remux.avi")
+
+    def test_strict_all_mode_blocks_known_incompatible_avi_extra_streams(self) -> None:
+        subtitle = subtitle_stream(index=2, codec="subrip", title="Traditional")
+        probe = make_probe(self.source, streams=self.probe.streams + (subtitle,))
+        with self.assertRaisesRegex(PlanError, "AVI cannot stream-copy every source stream"):
+            build_remux_plan(probe, self.root / "strict.avi", "avi", "all")
+
     def test_strict_all_mode_blocks_known_incompatible_mp4_stream_before_ffmpeg(self) -> None:
         subtitle = subtitle_stream(index=2, codec="subrip", title="Traditional")
         probe = make_probe(self.source, streams=self.probe.streams + (subtitle,))
@@ -126,6 +150,54 @@ class PlanningTests(unittest.TestCase):
         joined = " ".join(plan.compatibility_notes)
         self.assertIn("remains lossless", joined)
         self.assertIn("frame count", joined)
+
+    def test_transcode_plan_resolves_profile_quality_suffix_and_audit_path(self) -> None:
+        output = self.root / "result.mp4"
+        plan = build_remux_plan(
+            self.probe,
+            output,
+            "mp4",
+            "av",
+            video_encoding_key=H264_SOFTWARE_PROFILE_KEY,
+            quality=17,
+            enforce_space=False,
+        )
+        self.assertFalse(plan.is_stream_copy)
+        self.assertTrue(plan.is_lossy)
+        self.assertEqual(plan.quality_value, 17)
+        self.assertEqual(plan.report_output, self.root / "result.mp4.transcode.json")
+        self.assertEqual(plan.resolved_video_encodings[0].encoder_name, "libx264")
+        self.assertEqual(plan.resolved_video_encodings[0].pixel_format, "yuv420p")
+        self.assertIn("lossy", " ".join(plan.compatibility_notes))
+        self.assertEqual(
+            suggest_output(
+                self.source,
+                "mp4",
+                video_encoding_key=H264_SOFTWARE_PROFILE_KEY,
+            ),
+            self.root / "源 & source_h264_x264.mp4",
+        )
+
+    def test_fixed_container_profile_rejects_mismatch_and_accepts_mov(self) -> None:
+        with self.assertRaisesRegex(PlanError, "requires MOV"):
+            build_remux_plan(
+                self.probe,
+                self.root / "prores.mp4",
+                "mp4",
+                "av",
+                video_encoding_key=PRORES_PROFILE_KEY,
+                enforce_space=False,
+            )
+        plan = build_remux_plan(
+            self.probe,
+            self.root / "prores.mov",
+            "mov",
+            "av",
+            video_encoding_key=PRORES_PROFILE_KEY,
+            enforce_space=False,
+        )
+        self.assertEqual(plan.profile.key, "mov")
+        self.assertIn("ProRes 4444 XQ", plan.resolved_video_encodings[0].label)
 
 
 if __name__ == "__main__":

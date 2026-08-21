@@ -8,6 +8,14 @@ import unittest
 from pathlib import Path
 
 from stream_copy_remuxer.engine import ContainerCompatibilityError, RemuxCancelled, RemuxEngine, RemuxError
+from stream_copy_remuxer.encoding import (
+    AV1_SOFTWARE_PROFILE_KEY,
+    DNXHR_PROFILE_KEY,
+    H264_NVENC_PROFILE_KEY,
+    H264_SOFTWARE_PROFILE_KEY,
+    HEVC_SOFTWARE_PROFILE_KEY,
+    PRORES_PROFILE_KEY,
+)
 from stream_copy_remuxer.planning import PlanError, build_remux_plan
 from stream_copy_remuxer.probe import probe_media
 from stream_copy_remuxer.tools import CREATE_NO_WINDOW, discover_toolchain
@@ -42,12 +50,18 @@ class FFmpegIntegrationTests(unittest.TestCase):
             check=False,
         )
 
-    def _make_ffv1(self, path: Path, *, with_audio: bool = False) -> None:
+    def _make_ffv1(
+        self,
+        path: Path,
+        *,
+        with_audio: bool = False,
+        size: str = "160x90",
+    ) -> None:
         arguments = [
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=160x90:rate=25:duration=1",
+            f"testsrc2=size={size}:rate=25:duration=1",
         ]
         if with_audio:
             arguments += [
@@ -166,12 +180,87 @@ class FFmpegIntegrationTests(unittest.TestCase):
         self.assertTrue(output.with_suffix(".mp4.remux.json").is_file())
         self.assertFalse(any("partial" in item.name or "preflight" in item.name for item in self.root.iterdir()))
 
-    def test_real_mov_and_mkv_destinations(self) -> None:
+    def test_real_source_aware_and_software_transcodes_are_verified(self) -> None:
+        assert self.toolchain.ffprobe is not None
+        source = self.root / "source-transcode.mkv"
+        self._make_ffv1(source, with_audio=True, size="320x180")
+        source_probe = probe_media(self.toolchain.ffprobe, source)
+        cases = (
+            (PRORES_PROFILE_KEY, "mov", "prores", "yuv444p12le", None),
+            (DNXHR_PROFILE_KEY, "mov", "dnxhd", "yuv444p10le", None),
+            (H264_SOFTWARE_PROFILE_KEY, "mp4", "h264", "yuv420p", 35),
+            (HEVC_SOFTWARE_PROFILE_KEY, "mp4", "hevc", "yuv444p12le", 35),
+            (AV1_SOFTWARE_PROFILE_KEY, "mp4", "av1", "yuv420p10le", 45),
+        )
+        for profile_key, container, codec, pixel_format, quality in cases:
+            with self.subTest(profile_key=profile_key):
+                output = self.root / f"{profile_key}.{container}"
+                plan = build_remux_plan(
+                    source_probe,
+                    output,
+                    container,
+                    "av",
+                    video_encoding_key=profile_key,
+                    quality=quality,
+                    enforce_space=False,
+                )
+                result = RemuxEngine(self.toolchain).run(plan)
+                self.assertTrue(result.verification.passed, result.verification)
+                self.assertEqual(result.output_probe.video_streams[0].codec_name, codec)
+                self.assertEqual(result.output_probe.video_streams[0].pixel_format, pixel_format)
+                self.assertEqual(result.output_probe.video_streams[0].width, 320)
+                self.assertEqual(result.output_probe.video_streams[0].height, 180)
+                self.assertEqual(result.output_probe.audio_streams[0].codec_name, "aac")
+                report_path = output.with_suffix(output.suffix + ".transcode.json")
+                report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+                self.assertTrue(report["video_encoding"]["lossy"])
+                self.assertEqual(report["video_encoding"]["profile_key"], profile_key)
+                self.assertIn("video transcode", report["method"])
+
+    def test_real_h264_nvenc_ultra_quality_preflight_and_transcode_when_gpu_is_usable(self) -> None:
+        if "h264_nvenc" not in self.toolchain.video_encoders:
+            self.skipTest("Detected FFmpeg does not expose h264_nvenc")
+        assert self.toolchain.ffprobe is not None
+        source = self.root / "source-nvenc.mkv"
+        self._make_ffv1(source, with_audio=True, size="320x180")
+        output = self.root / "h264-nvenc.mp4"
+        plan = build_remux_plan(
+            probe_media(self.toolchain.ffprobe, source),
+            output,
+            "mp4",
+            "av",
+            video_encoding_key=H264_NVENC_PROFILE_KEY,
+            quality=30,
+            enforce_space=False,
+        )
+        try:
+            result = RemuxEngine(self.toolchain).run(plan)
+        except ContainerCompatibilityError as exc:
+            detail = str(exc).lower()
+            hardware_unavailable = any(
+                phrase in detail
+                for phrase in (
+                    "no capable devices",
+                    "cannot load nvcuda",
+                    "minimum required nvidia driver",
+                    "openencodesessionex failed",
+                    "does not support the required nvenc api",
+                )
+            )
+            if hardware_unavailable:
+                self.skipTest(f"h264_nvenc is advertised but no compatible GPU/driver is usable: {exc}")
+            raise
+        self.assertTrue(result.verification.passed)
+        self.assertEqual(result.output_probe.video_streams[0].codec_name, "h264")
+        self.assertEqual(result.output_probe.video_streams[0].pixel_format, "yuv420p")
+        self.assertEqual(result.output_probe.audio_streams[0].codec_name, "aac")
+
+    def test_real_mov_mkv_and_avi_destinations(self) -> None:
         assert self.toolchain.ffprobe is not None
         source = self.root / "source.mkv"
         self._make_ffv1(source)
         source_probe = probe_media(self.toolchain.ffprobe, source)
-        for container, extension in (("mov", ".mov"), ("mkv", ".mkv")):
+        for container, extension in (("mov", ".mov"), ("mkv", ".mkv"), ("avi", ".avi")):
             with self.subTest(container=container):
                 output = self.root / f"remuxed{extension}"
                 plan = build_remux_plan(source_probe, output, container, "av")

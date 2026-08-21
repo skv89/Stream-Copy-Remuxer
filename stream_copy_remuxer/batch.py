@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .engine import RemuxCancelled, RemuxEngine
+from .encoding import COPY_PROFILE_KEY, effective_container_key, profile_for
 from .models import CONTAINER_PROFILES, MediaProbe, ProgressUpdate, RemuxPlan, RemuxResult, Toolchain
 from .planning import PlanError, suggest_output
 
@@ -26,6 +27,8 @@ class BatchItem:
     item_id: str
     source: Path
     container_key: str = "mp4"
+    video_encoding_key: str = COPY_PROFILE_KEY
+    quality_value: int | None = None
     media: MediaProbe | None = None
     output: Path | None = None
     state: str = STATE_INSPECTING
@@ -107,11 +110,18 @@ def allocate_output_paths(
     reserved = list(locked_outputs)
     allocated: dict[str, Path] = {}
     for item in items:
+        expected_container = effective_container_key(item.video_encoding_key, item.container_key)
         if item.container_key not in CONTAINER_PROFILES:
             raise PlanError(f"Unsupported destination container: {item.container_key}")
+        if expected_container != item.container_key:
+            raise PlanError(
+                f"{profile_for(item.video_encoding_key).label} requires "
+                f"{CONTAINER_PROFILES[expected_container].label} output."
+            )
         output = suggest_output(
             item.source,
             item.container_key,
+            video_encoding_key=item.video_encoding_key,
             output_directory=destination,
             reserved_paths=reserved,
         )
@@ -153,9 +163,11 @@ def ensure_batch_space(plans: Iterable[RemuxPlan]) -> tuple[BatchSpaceRequiremen
 
     requirements: list[BatchSpaceRequirement] = []
     for (_device, anchor), grouped_plans in groups.items():
-        source_bytes = sum(plan.source_probe.size for plan in grouped_plans)
-        reserve = max(256 * 1024 * 1024, source_bytes // 100)
-        required = source_bytes + reserve
+        estimated_output_bytes = sum(
+            plan.estimated_output_bytes or plan.source_probe.size for plan in grouped_plans
+        )
+        reserve = max(256 * 1024 * 1024, estimated_output_bytes // 100)
+        required = estimated_output_bytes + reserve
         available = shutil.disk_usage(grouped_plans[0].output.parent).free
         volume = anchor or str(grouped_plans[0].output.parent)
         requirement = BatchSpaceRequirement(

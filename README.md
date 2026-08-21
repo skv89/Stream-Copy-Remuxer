@@ -1,97 +1,127 @@
-# Stream Copy Remuxer 1.3.2
+# Stream Copy Remuxer 1.4.1
 
 Certain software such as Topaz Video are more or less compatible with different containers. This app allows changing containers without re-encoding the video or audio.
 
-Stream Copy Remuxer is a Windows batch front end for FFmpeg stream copy. It changes the container around already-encoded streams; it does not decode, re-encode, resize, or otherwise alter encoded video/audio packets.
+Stream Copy Remuxer is a Windows batch front end for FFmpeg. Stream copy remains the default: it changes the container around existing encoded packets without decoding or re-encoding them. Version 1.4.x also includes clearly labeled, optional video-transcoding profiles for applications that cannot import the source codec even after a remux. Transcoding decodes and re-encodes video and should be treated as lossy; selected non-video streams are still copied when the output container supports them.
 
-Version 1.3.2 adds loss-safe handling for extra streams that MP4 or MOV cannot copy. **All compatible streams** maps exact stream indexes, keeps video/audio and supported extras, and names every intentionally omitted track in the table, Details log, confirmation workflow, and audit report. **Video only** removes audio and every other non-video stream for maximum compatibility while still copying the encoded video unchanged. **All source streams (strict)** remains available when nothing may be omitted. The Details log is also five rows taller (10 visible rows). The bounded FFV1 input analysis added in 1.3.1 remains unchanged.
+## What's new in 1.4.1
+
+- AVI is available as a Stream Copy output container alongside MP4, MOV, and MKV. The disposable preflight still decides whether the selected codecs can actually be carried by AVI without conversion.
+- CRF/CQ controls are now shown only for encoders that use them. Stream Copy, ProRes, and DNxHR no longer display an inapplicable disabled quality field.
+
+## What's new in 1.4.0
+
+- Source-aware ProRes and DNxHR MOV outputs choose the closest supported class from each source video's detected chroma family, bit depth, RGB family, and alpha presence.
+- Software and NVIDIA NVENC choices are available for H.264, HEVC, and AV1.
+- H.264 software uses `libx264`, 8-bit 4:2:0, and the requested `placebo` preset for maximum compatibility and compression effort.
+- H.264 NVENC uses the requested P7/HQ, VBR-CQ, full-resolution multipass, four B-frames, middle B-reference mode, 27-frame rate-control lookahead, lookahead level 3, spatial AQ off, and temporal AQ on.
+- CRF/CQ is user-editable with encoder-specific validation and an Ultra HQ default of 12.
+- **Encoding help** opens a reusable, high-contrast window that explains the current selection, every output profile, CRF/CQ, container behavior, copied streams, and detected encoder availability.
+- Each queue row shows its planned output video profile and resolved pixel format. Codec-specific output names and `.transcode.json` audit reports keep transcoded results distinct from `_remux` outputs.
+
+All existing 1.3.2 stream-copy safeguards remain: compatible-stream omission, video-only mode, exact stream mapping, disposable preflight, verified atomic publication, optional common destination, drag-and-drop, and automatic FFmpeg detection/installation.
 
 ## Batch workflow
 
 1. Extract the release ZIP and open `Stream Copy Remuxer.exe`.
 2. Drag multiple media files from File Explorer onto the window, or choose **Add files** and select several files.
 3. Wait while FFprobe fills each row's detected input container, video encoding, audio encoding, and compatibility guidance.
-4. Select one or more rows and choose **MP4**, **MOV**, or **MKV**. New rows default to MP4.
-5. Choose the stream mode:
-   - **Video + audio** copies all video and audio streams. It excludes subtitle, attachment, and data streams. Container metadata and chapters are still mapped separately and retained where the destination supports them.
-   - **Video only** copies every video stream and excludes audio, subtitle, attachment, and data streams for maximum compatibility. Exact omissions are disclosed before the batch and recorded in its audit report.
-   - **All compatible streams** keeps every stream covered by the destination's conservative stream-copy rules. MP4/MOV retain video, audio, and existing `mov_text` subtitles; incompatible extras such as SubRip are explicitly named and omitted without conversion. MKV keeps every source stream.
-   - **All source streams (strict)** omits nothing. If MP4/MOV cannot copy a known extra stream, the app blocks the batch before FFmpeg starts and recommends compatible mode, video+audio mode, video-only mode, or MKV.
-6. Optionally choose a common **Destination folder** for the batch. Leave it blank to put each output beside its own source. **Clear** restores the blank/default behavior.
-7. Select **Start batch**, review the destination summary, and confirm.
+4. Select one or more rows and choose a **Video output** mode. New rows default to **Stream copy — no re-encoding**.
+5. For stream copy, choose MP4, MOV, MKV, or AVI. Transcoding profiles automatically set their required output container: ProRes/DNxHR use MOV; H.264/HEVC/AV1 use MP4.
+6. For a CRF/CQ profile, enter the desired whole-number quality value. The value is applied to selected rows.
+7. Choose the stream mode:
+   - **Video + audio** keeps every video and audio track, but excludes subtitle, attachment, and data tracks.
+   - **Video only** keeps only video and removes audio plus every other non-video stream for maximum compatibility.
+   - **All compatible streams** keeps every conservatively supported track and explicitly omits incompatible MP4/MOV/AVI extras. MKV keeps every source stream.
+   - **All source streams (strict)** omits nothing and blocks a known-incompatible MP4/MOV/AVI operation before FFmpeg starts.
+8. Optionally choose one common **Destination folder**. Leave it blank to place each output beside its source.
+9. Choose **Start batch**, review the exact outputs, modes, destinations, stream omissions, and lossy-transcode warning, then confirm.
 
-With a blank Destination folder, each GUI output is written beside its source as `<source name>_remux.<selected extension>`. With a common destination, all uncompleted rows are written there. If a proposed path or audit report already exists—or same-stem inputs would collide—the app safely uses `_remux_2`, `_remux_3`, and so on. Existing files are never overwritten. Changing the setting never moves or deletes completed outputs.
-
-Rows run sequentially to avoid competing for disk bandwidth on large lossless intermediates. A per-file compatibility or remux failure is recorded in that row and does not stop later files. Completed rows remain visible and their verified outputs remain available.
-
-Select queue rows and press **Delete** (or choose **Remove selected**) to remove those rows. This never deletes source files, completed outputs, or reports. Queue editing is locked while a batch is active so the UI and worker cannot diverge.
+Rows run sequentially to avoid competing for disk bandwidth. A per-file failure is recorded in that row and does not stop later files. Select queue rows and press **Delete** (or choose **Remove selected**) to remove only those rows; no source, completed output, or report is deleted.
 
 After completion, **Show output** opens the actual folder containing the selected verified output. If no completed row is selected, it opens the most recently verified output folder.
 
-## Input and output formats
+## Video output profiles
 
-The file picker includes MKV, MP4, MOV, AVI, RM/RMVB, TS/MTS/M2TS, WebM, FLV/F4V, WMV/ASF, MPG/MPEG/VOB, OGV/Ogg, 3GP/3G2, MXF, DV, NUT, Y4M, and M4V. **All files** and drag-and-drop also accept any other file that the detected FFprobe can inspect.
+| Video output | Container | Automatic pixel-format/class behavior | Quality control |
+|---|---|---|---|
+| Stream copy | MP4, MOV, MKV, or AVI | Video packets are unchanged | None; the quality controls are hidden |
+| ProRes source-aware | MOV | RGB, 4:4:4, or alpha → ProRes 4444 XQ; other sources → ProRes 422 HQ. `prores_ks` accepts 10-bit input; FFprobe commonly reports decoded XQ as 12-bit. Alpha is retained by the XQ path. | Fixed high-quality lossy class |
+| DNxHR source-aware | MOV | RGB/4:4:4/alpha → DNxHR 444 10-bit; other >8-bit → HQX 4:2:2 10-bit; other 8-bit → HQ 4:2:2 8-bit. DNxHR cannot retain alpha, so alpha loss is disclosed and ProRes 4444 XQ is recommended when alpha matters. | Fixed high-quality lossy class |
+| H.264 x264 | MP4 | Always 8-bit 4:2:0 for maximum compatibility; `libx264 -preset placebo -profile high` | CRF 0–51, default 12 |
+| H.264 NVENC | MP4 | Always 8-bit 4:2:0 for maximum compatibility | CQ 0–51, default 12 |
+| HEVC x265 | MP4 | Closest supported planar chroma/bit-depth path; `libx265 -preset veryslow`; alpha is discarded | CRF 0–51, default 12 |
+| HEVC NVENC | MP4 | Closest supported NVENC chroma/bit-depth path; P7/UHQ VBR-CQ | CQ 0–51, default 12 |
+| AV1 SVT-AV1 | MP4 | 4:2:0 at 8 or 10 bit; `libsvtav1 -preset 0`; alpha is discarded | CRF 0–63, default 12 |
+| AV1 NVENC | MP4 | Closest supported NVENC chroma/bit-depth path; P7/UHQ VBR-CQ | CQ 0–63, default 12 |
 
-Input recognition is not the same as output compatibility. For example, an older RealVideo stream may be readable from RMVB but impossible to copy into MP4. Each row therefore receives a short destination-container preflight before the full copy. Known incompatible extra streams are handled before launch according to the selected stream mode; other incompatible combinations fail safely without publishing an output.
+The exact encoder must be exposed by the detected FFmpeg build. Hardware modes additionally require a compatible NVIDIA GPU and driver. The app checks the encoder list immediately and performs a one-second disposable preflight before the full transcode, so unsupported GPU options fail early without publishing an output.
 
-The only GUI output choices are:
+### H.264 NVENC Ultra HQ command profile
 
-| Destination | Typical use | Important limitation |
-|---|---|---|
-| MP4 | Default; common H.264/H.265/AV1 media; finalized FFV1 intermediate for Topaz | Some legacy codecs and subtitle/data/attachment streams are unsupported; FFV1/MP4 is not supported by every player/editor |
-| MOV | ProRes and QuickTime-oriented workflows | FFV1/MOV is unusual; some copied codecs are not valid in MOV |
-| MKV | Broadest codec and stream preservation | FFV1 frame count can remain unavailable to some software |
+The H.264 NVENC mode preserves these requested settings:
+
+```text
+-c:v h264_nvenc -pix_fmt yuv420p
+-preset p7 -tune hq -rc vbr -cq <user CQ> -b:v 0
+-multipass fullres -bf 4 -b_ref_mode middle
+-rc-lookahead 27 -lookahead_level 3
+-spatial-aq 0 -temporal-aq 1 -profile high
+```
+
+`b_ref_mode=middle` is the hierarchical middle B-reference option exposed by FFmpeg 9.0.1. A GPU/driver that advertises `h264_nvenc` can still reject `lookahead_level 3`; the preflight reports the exact driver message rather than silently lowering the requested setting.
+
+## CRF and CQ guidance
+
+Lower numbers retain more detail and usually create larger files. The default 12 is an Ultra HQ setting and can create very large files. As a starting guide:
+
+- 12: Ultra HQ; slow/large, intended when quality is prioritized over size.
+- 16–18: still very high quality for many sources.
+- 20–23: a more typical delivery range.
+
+Content, resolution, grain, and encoder differ, so there is no universal visual equivalence between CRF and CQ. NVENC CQ 0 means automatic selection, not lossless. Software value 0 is accepted, but pixel-format conversion and codec behavior mean the app still treats every transcode as potentially lossy; use stream copy or a true lossless workflow when mathematical preservation is required.
+
+The x264 `placebo`, x265 `veryslow`, and SVT-AV1 preset 0 modes can be extremely slow. Their primary purpose here is maximum software encoding effort, as requested, not fast delivery.
+
+## Output names and containers
+
+With a blank Destination folder, outputs are placed beside each source. With a common destination, all uncompleted rows are placed in that folder. Names use:
+
+- `_remux` for stream copy;
+- `_prores`, `_dnxhr`, `_h264_x264`, `_h264_nvenc`, `_hevc_x265`, `_hevc_nvenc`, `_av1_svt`, or `_av1_nvenc` for transcoding.
+
+If a proposed media path or audit report already exists—or same-stem inputs would collide—the app adds `_2`, `_3`, and so on. Existing files are never overwritten. Stream-copy reports end in `.remux.json`; transcode reports end in `.transcode.json`.
+
+The file picker includes MKV, MP4, MOV, AVI, RM/RMVB, TS/MTS/M2TS, WebM, FLV/F4V, WMV/ASF, MPG/MPEG/VOB, OGV/Ogg, 3GP/3G2, MXF, DV, NUT, Y4M, and M4V. **All files** and drag-and-drop accept any other file that the detected FFprobe can inspect.
+
+Input recognition is not the same as output compatibility. AVI is a legacy container and is especially limited with modern codecs and extra streams. A short preflight tests the actual selected streams, encoder, and destination muxer before the full operation.
 
 ## Verification and file safety
 
 For every row, the app:
 
-- uses `-c copy` and passes paths as explicit process arguments, never through a shell;
-- runs a short compatibility preflight before a potentially very large copy;
-- writes to a unique application-owned partial file in the selected output folder;
-- never overwrites a source, existing output, existing report, or destination that appears during processing;
-- verifies selected stream codecs and core properties, duration, chapters, and source identity;
-- requires FFV1 in MP4/MOV to expose a positive indexed frame count;
+- passes paths as explicit process arguments and never through a shell;
+- checks the source identity again immediately before work and before publication;
+- runs a disposable container/encoder preflight;
+- writes to a unique application-owned partial file in the destination folder;
+- never overwrites a source, output, report, or destination that appears during processing;
+- verifies copied non-video codecs/properties and the planned transcoded video codec, profile, tag, dimensions, pixel format, and frame rate;
+- verifies timeline duration and chapters on the complete output;
+- requires stream-copied FFV1 in MP4/MOV to expose a positive indexed frame count;
 - promotes the partial file atomically only after verification passes; and
-- writes an adjacent `<output>.remux.json` report containing the exact command, probes, and checks.
+- writes the exact command, probes, selected/omitted streams, resolved encoder settings, quality value, space estimates, and checks to the adjacent JSON audit report.
 
-Before starting, aggregate free space is checked per destination volume for the complete ready batch. Plan for approximately one additional source-sized allocation per output plus a reserve. Stream copy is usually limited by source/destination disk speed and does not make a lossless source substantially smaller.
+Before starting, aggregate free space is checked per destination volume. Stream copy reserves approximately one source-sized output plus a safety margin. Transcoding uses a conservative profile/resolution estimate and refines it from the disposable preflight. These are safety estimates, not guaranteed final sizes.
 
-Cancel stops the active FFmpeg process and removes its partial/preflight files. Already completed outputs remain intact, while unstarted rows return to a retryable state.
+Cancel stops the active FFmpeg process and removes its partial/preflight files. Already completed outputs remain intact; unstarted rows return to a retryable state.
 
 ## Stream selection details
 
-**Video + audio** uses:
+Stream copy uses `-c copy` for every selected stream. In a transcoding profile, every selected video stream receives its resolved encoder independently, while selected audio/subtitle/data streams use stream copy.
 
-```text
--map 0:v? -map 0:a? -map_metadata 0 -map_chapters 0
-```
+**Video + audio** selects video and audio and maps container metadata/chapters. **Video only** selects video and maps metadata/chapters. **All compatible streams** maps exact inspected stream indexes, allowing known-incompatible extras to be named and omitted; AVI conservatively omits subtitle, attachment, and data tracks in this mode. **All source streams (strict)** requests every source stream and blocks known-incompatible MP4/MOV/AVI combinations instead of silently dropping data.
 
-It omits subtitle, attachment, and data streams, while separately mapping container metadata and chapters.
-
-**Video only** uses:
-
-```text
--map 0:v? -map_metadata 0 -map_chapters 0
-```
-
-It copies every encoded video stream unchanged and intentionally excludes audio and every non-video stream. The exact omitted tracks are shown in the table, confirmation, Details log, and JSON audit report.
-
-**All compatible streams** uses explicit input-stream indexes. For an FFV1/AAC/SubRip source going to MP4, for example, it uses:
-
-```text
--map 0:0 -map 0:1 -map_metadata 0 -map_chapters 0
-```
-
-The SubRip stream is omitted because copying it into MP4/MOV is unsupported, and the exact omitted index, type, codec, language, and title are disclosed. Existing `mov_text` subtitle streams are retained. For MKV, compatible mode selects every source stream. All selected streams still use `-c copy`.
-
-**All source streams (strict)** uses:
-
-```text
--map 0 -map_metadata 0 -map_chapters 0
-```
-
-It attempts every FFprobe stream and never drops one. A known SubRip/attachment/data incompatibility with MP4/MOV is reported before FFmpeg starts; use MKV if every such stream must be retained without re-encoding.
+For example, an FFV1/AAC/SubRip MKV going to MP4 in compatible mode maps video and audio only. The confirmation, Details log, table, and audit report name the omitted SubRip track.
 
 ## FFmpeg detection and installation
 
@@ -101,68 +131,43 @@ At startup, the app automatically detects a paired `ffmpeg.exe` and `ffprobe.exe
 2. the highest versioned `ffmpeg\<version>\bin` installation beside the app;
 3. a legacy app-local `tools\ffmpeg\bin` folder;
 4. FFmpeg on `PATH` and common standalone installation folders; and
-5. known application-bundled copies as a last-resort system fallback.
+5. known application-bundled copies as a last-resort fallback.
 
-The GUI displays only the detected FFmpeg version, generic source class, and path. It does not advertise the application that may have installed a system copy.
+The GUI reports the detected version, generic source class, and path. It also inspects that exact build's video encoder list for profile availability.
 
-The app checks current stable-release metadata in the background. If FFmpeg is missing or older, **Install FFmpeg `<version>`** appears. Installation requires explicit confirmation and then:
-
-1. downloads the current release-essentials ZIP from gyan.dev, a Windows-build provider linked by FFmpeg.org;
-2. fetches the provider's current version and SHA-256 metadata over HTTPS;
-3. restricts redirects to the expected provider host;
-4. verifies the complete archive checksum before extraction;
-5. rejects unsafe or incomplete ZIP content;
-6. stages and validates `ffmpeg.exe` plus `ffprobe.exe`; and
-7. promotes the validated files into a versioned `ffmpeg` subfolder beside the app.
-
-As of August 17, 2026, the official current stable release is FFmpeg 9.0.1. The app queries current metadata rather than permanently assuming 9.0.1 will remain current. The release ZIP does not bundle FFmpeg; downloading it remains optional and user initiated.
-
-If the app folder is not writable, extract or move the release folder to a location you can write to, then retry installation.
+The app checks stable-release metadata in the background. If FFmpeg is missing or older, **Install FFmpeg `<version>`** appears. Installation is user-confirmed, downloads the current release-essentials ZIP from gyan.dev, verifies provider metadata and SHA-256, rejects unsafe ZIP paths, validates `ffmpeg.exe`/`ffprobe.exe`, and installs them into a versioned subfolder beside the app. The release ZIP does not bundle FFmpeg.
 
 ## Drag-and-drop
 
-Native File Explorer drag-and-drop uses TkinterDnD2/TkDND's Windows OLE2 integration. Multi-file payloads are parsed as Tcl lists so spaces, braces, ampersands, and Unicode paths remain intact. The former custom Python/ctypes Windows window-procedure hook is not used.
-
-Windows normally blocks a non-elevated Explorer process from dropping into an application deliberately launched as administrator. This app does not request elevation; run Explorer and the app at the same integrity level or use **Add files**.
-
-## FFV1/MKV to finalized MP4
-
-For an FFV1/MKV intermediate, add the source, leave its output set to MP4, and run the batch. The equivalent direct command is:
-
-```powershell
-& 'C:\path\to\ffmpeg.exe' `
-  -hide_banner -nostdin -n `
-  -i 'D:\path\input.mkv' `
-  -map '0:v?' -map '0:a?' `
-  -map_metadata 0 -map_chapters 0 `
-  -c copy -tag:v:0 FFV1 `
-  -f mp4 'D:\path\input_remux.mp4'
-```
-
-`-tag:v:0 FFV1` is appropriate only when the first copied video stream is FFV1. MP4/MOV outputs are ordinary finalized files, not fragmented files. The app does not use `faststart`, which would require an avoidable second rewrite of a very large local output.
-
-## Current limitations
-
-- The queue is not persisted after the application closes.
-- Files run one at a time by design.
-- Container compatibility is determined by the detected FFmpeg build and actual streams, not by filename extension alone.
-- Stream copy can normalize container-level timestamps, tags, or dispositions where container standards differ.
-- Verification avoids a second full-file packet-hash pass, which would double I/O on very large files.
-- The app-local FFmpeg installer requires internet access and a writable extracted application folder.
-- The standalone EXE is not Authenticode-signed unless a signing identity is provided separately.
+Native File Explorer drag-and-drop uses TkinterDnD2/TkDND's Windows OLE2 integration. Multi-file payloads are parsed as Tcl lists so spaces, braces, ampersands, and Unicode paths remain intact. Windows normally blocks drag-and-drop between processes at different integrity levels; run Explorer and the app at the same elevation level or use **Add files**.
 
 ## Command-line modes
 
-The existing diagnostic and single-file remux modes remain available. GUI outputs default beside sources and can optionally share one destination folder; command-line remuxes retain an explicit `--output` path:
+The GUI is the primary batch interface. Diagnostic and single-file CLI modes remain available:
 
 ```powershell
 Stream Copy Remuxer.exe --dependency-check --output dependency.json
 Stream Copy Remuxer.exe --self-test --output self-test.json
 Stream Copy Remuxer.exe --probe input.mkv --output probe.json
 Stream Copy Remuxer.exe --remux input.mkv --output output.mp4 --container mp4 --stream-mode av
-Stream Copy Remuxer.exe --remux input.mkv --output video-only.mp4 --container mp4 --stream-mode video
-Stream Copy Remuxer.exe --remux input.mkv --output output.mp4 --container mp4 --stream-mode compatible
-Stream Copy Remuxer.exe --ffmpeg C:\ffmpeg\bin\ffmpeg.exe --dependency-check
+Stream Copy Remuxer.exe --remux input.mkv --output output.avi --container avi --stream-mode av
+Stream Copy Remuxer.exe --remux input.mkv --output output.mov --container mov --video-encoding prores_source_aware
+Stream Copy Remuxer.exe --remux input.mkv --output output.mp4 --container mp4 --video-encoding h264_x264_placebo --quality 12
+Stream Copy Remuxer.exe --remux input.mkv --output output.mp4 --container mp4 --video-encoding h264_nvenc_p7 --quality 12
 ```
 
-The self-test creates FFV1/MKV, MPEG-4/AVI, and FFV1/AAC/SubRip MKV sources. It exercises repeated multi-file TkDND/Tcl-list dispatch, verifies blank and common-destination planning, Status-column sizing, the 10-row Details log, `_remux` collision handling, and Delete-row behavior, and audits layout at 100%, 150%, and 200% scaling. It then stream-copies four plans through a Unicode common destination, verifies compatible-mode SubRip omission and video-only audio/subtitle omission disclosures, and verifies all outputs.
+`--video-encoding` choices are `copy`, `prores_source_aware`, `dnxhr_source_aware`, `h264_x264_placebo`, `h264_nvenc_p7`, `hevc_x265_veryslow`, `hevc_nvenc_p7`, `av1_svt_p0`, and `av1_nvenc_p7`.
+
+The packaged self-test creates real FFV1, audio, and subtitle sources; exercises drag-and-drop dispatch, queue/profile/quality/help behavior, common destinations, stream-copy modes, and 100/150/200% DPI layouts; runs verified ProRes, DNxHR, x264, x265, and SVT-AV1 outputs; and statically verifies every requested H.264 NVENC command option without requiring NVIDIA hardware.
+
+## Current limitations
+
+- The queue is not persisted after the app closes.
+- Files run one at a time by design.
+- Selected non-video streams are copied, not automatically transcoded; an incompatible audio/subtitle codec can therefore be rejected by the destination preflight.
+- Hardware encoder availability depends on the exact FFmpeg build, GPU generation, and installed driver. Encoder presence alone does not guarantee every requested option is supported.
+- Alpha is preserved only by the ProRes 4444 XQ path among the supplied compatibility profiles; every affected profile discloses alpha removal.
+- Container standards can normalize timestamps, tags, dispositions, or chapter representation.
+- Verification avoids a second full-file packet-hash pass, which would double I/O on large files.
+- The app-local FFmpeg installer requires internet access and a writable extracted application folder.
+- The standalone EXE is not Authenticode-signed unless a signing identity is supplied separately.

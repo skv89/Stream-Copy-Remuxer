@@ -11,7 +11,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from collections import Counter
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Callable
 
 from . import __version__
@@ -33,6 +33,22 @@ from .batch import (
     unique_existing_files,
 )
 from .drop_support import FileDropRegistration, create_root, register_file_drop
+from .encoding import (
+    COPY_PROFILE_KEY,
+    ENCODING_LABEL_BY_KEY,
+    ENCODING_LABELS,
+    H264_SOFTWARE_PROFILE_KEY,
+    PRORES_PROFILE_KEY,
+    EncodingError,
+    effective_container_key,
+    encoder_availability,
+    encoding_help_text,
+    profile_description,
+    profile_for,
+    quality_spec,
+    resolve_quality,
+    resolve_video_encoding,
+)
 from .engine import RemuxCancelled
 from .ffmpeg_install import (
     FFmpegInstallCancelled,
@@ -41,7 +57,15 @@ from .ffmpeg_install import (
     install_release,
     installed_version_is_older,
 )
-from .models import CONTAINER_PROFILES, MediaProbe, ProgressUpdate, RemuxPlan, RemuxResult, Toolchain
+from .models import (
+    CONTAINER_PROFILES,
+    MediaProbe,
+    ProgressUpdate,
+    RemuxPlan,
+    RemuxResult,
+    StreamInfo,
+    Toolchain,
+)
 from .planning import PlanError, build_remux_plan, compatibility_notes, describe_streams
 from .probe import probe_media
 from .tools import application_root, concise_ffmpeg_version, discover_toolchain
@@ -56,14 +80,32 @@ CONTAINER_LABELS = {profile.label: key for key, profile in CONTAINER_PROFILES.it
 STREAM_MODE_LABELS = {
     "Video + audio — excludes subtitle, attachment, and data streams; keeps metadata and chapters": "av",
     "Video only — excludes audio, subtitle, attachment, and data streams; keeps metadata and chapters": "video",
-    "All compatible streams — omits only extras MP4/MOV cannot copy; MKV keeps every stream": "compatible",
-    "All source streams (strict) — omits nothing; incompatible MP4/MOV batches are blocked": "all",
+    "All compatible streams — omits only extras MP4/MOV/AVI cannot copy; MKV keeps every stream": "compatible",
+    "All source streams (strict) — omits nothing; incompatible MP4/MOV/AVI batches are blocked": "all",
 }
 STREAM_MODE_CONFIRMATION_LABELS = {
     "av": "video + audio",
     "video": "video only (audio and every non-video stream are omitted)",
     "compatible": "all compatible streams (disclosed incompatible extras are omitted)",
     "all": "all source streams (strict; nothing omitted)",
+}
+STREAM_MODE_HELP = {
+    "av": (
+        "Keeps every video and audio track. Subtitle, attachment, and data tracks are omitted; "
+        "global metadata and chapters are retained when the destination supports them."
+    ),
+    "video": (
+        "Keeps only video. Audio, subtitle, attachment, and data tracks are omitted for maximum compatibility; "
+        "global metadata and chapters are retained when supported."
+    ),
+    "compatible": (
+        "Keeps video, audio, and conservatively supported extra tracks. MP4/MOV/AVI omit incompatible extras "
+        "after naming them; MKV keeps every source stream."
+    ),
+    "all": (
+        "Requests every source stream. A known-incompatible MP4/MOV/AVI operation is blocked instead of silently "
+        "dropping data; MKV is the broadest strict destination."
+    ),
 }
 COMMON_MEDIA_PATTERN = " ".join(
     (
@@ -161,12 +203,19 @@ class StreamCopyRemuxerApp:
         self._closing = False
         self._current_item_id: str | None = None
         self._default_container_key = "mp4"
+        self._default_video_encoding_key = COPY_PROFILE_KEY
+        self._default_quality_value = 12
         self._planning_error = ""
         self._folder_opener = folder_opener
         self.last_results: list[RemuxResult] = []
+        self._encoding_help_window: tk.Toplevel | None = None
+        self._encoding_help_text: scrolledtext.ScrolledText | None = None
 
         self.description_var = tk.StringVar(value=DESCRIPTION)
         self.container_var = tk.StringVar(value="MP4")
+        self.encoding_var = tk.StringVar(value=ENCODING_LABEL_BY_KEY[COPY_PROFILE_KEY])
+        self.quality_var = tk.StringVar(value=str(self._default_quality_value))
+        self.quality_label_var = tk.StringVar(value="")
         self.stream_mode_var = tk.StringVar(value=next(iter(STREAM_MODE_LABELS)))
         self.destination_var = tk.StringVar(value="")
         self.queue_hint_var = tk.StringVar(value="Drag and drop media files here, or use Add files")
@@ -176,6 +225,7 @@ class StreamCopyRemuxerApp:
 
         self._configure_window()
         self._build_widgets()
+        self._update_encoding_controls()
         self._update_tool_label()
         self._set_running(False)
         self._ui_after_id = self.root.after(20, self._drain_ui_events)
@@ -255,6 +305,7 @@ class StreamCopyRemuxerApp:
             "input_container",
             "video",
             "audio",
+            "output_video",
             "output_container",
             "compatibility",
             "status",
@@ -272,6 +323,7 @@ class StreamCopyRemuxerApp:
             "input_container": "Input container",
             "video": "Video encoding",
             "audio": "Audio encoding",
+            "output_video": "Output video",
             "output_container": "Output container",
             "compatibility": "Compatibility",
             "status": "Status",
@@ -283,6 +335,7 @@ class StreamCopyRemuxerApp:
             "input_container": 190,
             "video": 135,
             "audio": 135,
+            "output_video": 250,
             "output_container": 125,
             "compatibility": 430,
             "status": status_width,
@@ -292,6 +345,7 @@ class StreamCopyRemuxerApp:
             "input_container": 150,
             "video": 110,
             "audio": 110,
+            "output_video": 180,
             "output_container": 115,
             "compatibility": 260,
             "status": status_minimum,
@@ -304,7 +358,7 @@ class StreamCopyRemuxerApp:
                 column,
                 width=readable_width,
                 minwidth=max(minimum_widths[column], int(heading_measure.measure(headings[column])) + 20),
-                stretch=column in {"source", "compatibility", "status"},
+                stretch=column in {"source", "output_video", "compatibility", "status"},
             )
         self._queue_headings = headings
         self.queue_tree.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=(0, 8))
@@ -322,9 +376,36 @@ class StreamCopyRemuxerApp:
 
         settings_frame = ttk.LabelFrame(outer, text="Output settings", style="Section.TLabelframe")
         settings_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        settings_frame.columnconfigure(2, weight=1)
-        ttk.Label(settings_frame, text="Output container for selected/new files:").grid(
+        settings_frame.columnconfigure(3, weight=1)
+        settings_frame.columnconfigure(5, weight=1)
+        ttk.Label(settings_frame, text="Video output for selected/new files:").grid(
             row=0, column=0, sticky="w", padx=(10, 6), pady=(9, 5)
+        )
+        self.encoding_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.encoding_var,
+            values=tuple(ENCODING_LABELS),
+            state="readonly",
+            width=47,
+        )
+        self.encoding_combo.grid(row=0, column=1, columnspan=3, sticky="ew", pady=(9, 5))
+        self.encoding_combo.bind("<<ComboboxSelected>>", lambda _event: self._encoding_changed())
+        self.quality_label = ttk.Label(settings_frame, textvariable=self.quality_label_var)
+        self.quality_label.grid(
+            row=0, column=4, sticky="e", padx=(16, 6), pady=(9, 5)
+        )
+        self.quality_entry = ttk.Entry(settings_frame, textvariable=self.quality_var, width=7)
+        self.quality_entry.grid(row=0, column=5, sticky="w", pady=(9, 5))
+        self.quality_entry.bind("<Return>", self._quality_changed)
+        self.quality_entry.bind("<FocusOut>", self._quality_changed)
+        self.encoding_help_button = ttk.Button(
+            settings_frame,
+            text="Encoding help",
+            command=self.show_encoding_help,
+        )
+        self.encoding_help_button.grid(row=0, column=6, sticky="e", padx=(8, 10), pady=(9, 5))
+        ttk.Label(settings_frame, text="Output container for selected/new files:").grid(
+            row=1, column=0, sticky="w", padx=(10, 6), pady=5
         )
         self.container_combo = ttk.Combobox(
             settings_frame,
@@ -333,9 +414,9 @@ class StreamCopyRemuxerApp:
             state="readonly",
             width=9,
         )
-        self.container_combo.grid(row=0, column=1, sticky="w", pady=(9, 5))
+        self.container_combo.grid(row=1, column=1, sticky="w", pady=5)
         self.container_combo.bind("<<ComboboxSelected>>", lambda _event: self._container_changed())
-        ttk.Label(settings_frame, text="Streams:").grid(row=0, column=3, sticky="e", padx=(16, 6), pady=(9, 5))
+        ttk.Label(settings_frame, text="Streams:").grid(row=1, column=2, sticky="e", padx=(16, 6), pady=5)
         self.stream_combo = ttk.Combobox(
             settings_frame,
             textvariable=self.stream_mode_var,
@@ -343,18 +424,18 @@ class StreamCopyRemuxerApp:
             state="readonly",
             width=86,
         )
-        self.stream_combo.grid(row=0, column=4, sticky="e", padx=(0, 10), pady=(9, 5))
+        self.stream_combo.grid(row=1, column=3, columnspan=4, sticky="ew", padx=(0, 10), pady=5)
         self.stream_combo.bind("<<ComboboxSelected>>", lambda _event: self._stream_mode_changed())
 
         ttk.Label(settings_frame, text="Destination folder (blank = beside each source):").grid(
-            row=1, column=0, sticky="w", padx=(10, 6), pady=(4, 9)
+            row=2, column=0, sticky="w", padx=(10, 6), pady=(4, 9)
         )
         self.destination_entry = ttk.Entry(settings_frame, textvariable=self.destination_var)
-        self.destination_entry.grid(row=1, column=1, columnspan=3, sticky="ew", pady=(4, 9))
+        self.destination_entry.grid(row=2, column=1, columnspan=5, sticky="ew", pady=(4, 9))
         self.destination_entry.bind("<Return>", self._destination_changed)
         self.destination_entry.bind("<FocusOut>", self._destination_changed)
         destination_buttons = ttk.Frame(settings_frame)
-        destination_buttons.grid(row=1, column=4, sticky="e", padx=(8, 10), pady=(4, 9))
+        destination_buttons.grid(row=2, column=6, sticky="e", padx=(8, 10), pady=(4, 9))
         self.destination_browse_button = ttk.Button(
             destination_buttons,
             text="Browse",
@@ -620,6 +701,222 @@ class StreamCopyRemuxerApp:
             parent=self.root,
         )
 
+    def _encoding_key(self) -> str:
+        return ENCODING_LABELS.get(self.encoding_var.get(), self._default_video_encoding_key)
+
+    def _current_quality(self) -> int | None:
+        return resolve_quality(self._encoding_key(), self.quality_var.get())
+
+    def _selected_help_stream(self) -> StreamInfo | None:
+        selected_ids = [item_id for item_id in self.queue_tree.selection() if item_id in self.items]
+        ordered_ids = selected_ids + [item_id for item_id in self._item_order if item_id not in selected_ids]
+        for item_id in ordered_ids:
+            media = self.items[item_id].media
+            if media and media.video_streams:
+                return media.video_streams[0]
+        return None
+
+    def _update_encoding_controls(self) -> None:
+        key = self._encoding_key()
+        profile = profile_for(key)
+        spec = quality_spec(key)
+        running = bool(self._worker and self._worker.is_alive())
+        if profile.fixed_container_key:
+            self.container_var.set(CONTAINER_PROFILES[profile.fixed_container_key].label)
+            self.container_combo.configure(state="disabled")
+        else:
+            self.container_combo.configure(state="disabled" if running else "readonly")
+        if spec is None:
+            self.quality_label_var.set("")
+            self.quality_entry.configure(state="disabled")
+            self.quality_label.grid_remove()
+            self.quality_entry.grid_remove()
+            self.encoding_combo.grid_configure(columnspan=5)
+        else:
+            self.encoding_combo.grid_configure(columnspan=3)
+            self.quality_label.grid()
+            self.quality_entry.grid()
+            self.quality_label_var.set(f"{spec.name} ({spec.minimum}–{spec.maximum}):")
+            self.quality_entry.configure(state="disabled" if running else "normal")
+        self._refresh_encoding_help()
+
+    def _encoding_changed(self) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        key = self._encoding_key()
+        profile = profile_for(key)
+        self._default_video_encoding_key = key
+        try:
+            selected_quality = resolve_quality(key, self.quality_var.get())
+        except EncodingError:
+            selected_quality = profile.quality.default if profile.quality else None
+            if selected_quality is not None:
+                self.quality_var.set(str(selected_quality))
+        if selected_quality is not None:
+            self._default_quality_value = selected_quality
+        container_key = effective_container_key(key, self._default_container_key)
+        self.container_var.set(CONTAINER_PROFILES[container_key].label)
+        selected_ids = [item_id for item_id in self.queue_tree.selection() if item_id in self.items]
+        for item_id in selected_ids:
+            item = self.items[item_id]
+            item.video_encoding_key = key
+            item.quality_value = selected_quality
+            item.container_key = container_key
+            item.result = None
+            if item.media is not None:
+                item.state = STATE_READY
+                item.detail = "Ready"
+        self._update_encoding_controls()
+        self._refresh_planned_outputs()
+        for item_id in selected_ids:
+            self._update_row(self.items[item_id])
+        available, detail = encoder_availability(self.toolchain, key)
+        self.status_var.set(
+            f"Video output mode: {profile.label}. {detail}"
+            if available
+            else f"Video output mode unavailable: {detail}"
+        )
+        self._update_controls()
+
+    def _quality_changed(self, event: tk.Event[tk.Misc] | None = None) -> str:
+        if self._worker and self._worker.is_alive():
+            return "break"
+        key = self._encoding_key()
+        spec = quality_spec(key)
+        if spec is None:
+            return "break" if event is not None and getattr(event, "keysym", "") == "Return" else ""
+        try:
+            value = resolve_quality(key, self.quality_var.get())
+        except EncodingError as exc:
+            self.status_var.set(f"Quality input error: {exc}")
+            self.root.bell()
+            return "break" if event is not None and getattr(event, "keysym", "") == "Return" else ""
+        assert value is not None
+        self.quality_var.set(str(value))
+        self._default_quality_value = value
+        selected_ids = [item_id for item_id in self.queue_tree.selection() if item_id in self.items]
+        for item_id in selected_ids:
+            item = self.items[item_id]
+            if item.video_encoding_key != key:
+                continue
+            item.quality_value = value
+            item.result = None
+            if item.media is not None:
+                item.state = STATE_READY
+                item.detail = "Ready"
+            self._update_row(item)
+        self._refresh_planned_outputs()
+        self.status_var.set(
+            f"{spec.name} {value} applied to selected {profile_for(key).label} row(s). "
+            "Lower values increase quality and usually file size."
+        )
+        self._refresh_encoding_help()
+        self._update_controls()
+        return "break" if event is not None and getattr(event, "keysym", "") == "Return" else ""
+
+    def show_encoding_help(self) -> None:
+        if self._encoding_help_window is not None:
+            try:
+                if self._encoding_help_window.winfo_exists():
+                    self._refresh_encoding_help()
+                    self._encoding_help_window.deiconify()
+                    self._encoding_help_window.lift()
+                    self._encoding_help_window.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self._encoding_help_window = None
+            self._encoding_help_text = None
+
+        window = tk.Toplevel(self.root)
+        window.title(f"Stream Copy Remuxer {__version__} — Encoding and stream help")
+        window.geometry("940x720")
+        window.minsize(700, 480)
+        window.configure(background="#0b1724")
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", self._close_encoding_help)
+        tk.Label(
+            window,
+            text="Encoding, quality, containers, and copied streams",
+            background="#0b1724",
+            foreground="#ffffff",
+            anchor="w",
+            font=("Segoe UI Semibold", 14),
+            padx=14,
+            pady=12,
+        ).pack(fill="x")
+        help_text = scrolledtext.ScrolledText(
+            window,
+            wrap="word",
+            background="#08131e",
+            foreground="#f5fbff",
+            insertbackground="#ffffff",
+            selectbackground="#176b87",
+            selectforeground="#ffffff",
+            relief="solid",
+            borderwidth=1,
+            font=("Segoe UI", 10),
+            padx=12,
+            pady=10,
+        )
+        help_text.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        footer = ttk.Frame(window)
+        footer.pack(fill="x", padx=14, pady=(0, 12))
+        ttk.Button(footer, text="Close", command=self._close_encoding_help).pack(side="right")
+        self._encoding_help_window = window
+        self._encoding_help_text = help_text
+        self._refresh_encoding_help()
+
+    def _refresh_encoding_help(self) -> None:
+        if self._encoding_help_text is None:
+            return
+        try:
+            key = self._encoding_key()
+            try:
+                selected_quality = resolve_quality(key, self.quality_var.get())
+                quality_error = ""
+            except EncodingError as exc:
+                selected_quality = quality_spec(key).default if quality_spec(key) else None
+                quality_error = f"\nCurrent quality input is invalid: {exc}"
+            stream = self._selected_help_stream()
+            available, availability = encoder_availability(self.toolchain, key)
+            mode = self._stream_mode()
+            all_stream_help = "\n\n".join(
+                f"{label}\n{STREAM_MODE_HELP[value]}"
+                for label, value in STREAM_MODE_LABELS.items()
+            )
+            content = (
+                "CURRENT SELECTION\n\n"
+                f"{profile_for(key).label}\n"
+                f"{profile_description(key, stream, selected_quality)}{quality_error}\n"
+                f"{'Available' if available else 'Unavailable'}: {availability}\n\n"
+                f"{self.stream_mode_var.get()}\n{STREAM_MODE_HELP[mode]}\n\n"
+                "ALL ENCODING OPTIONS\n\n"
+                f"{encoding_help_text(self.toolchain, stream)}\n\n"
+                "STREAMS TO COPY\n\n"
+                f"{all_stream_help}\n\n"
+                "Every transcoding mode decodes and re-encodes selected video and is lossy. Selected non-video "
+                "tracks are still copied according to the stream mode. A disposable preflight verifies the exact "
+                "encoder, GPU when required, container, and planned stream properties before the full file starts."
+            )
+            self._encoding_help_text.configure(state="normal")
+            self._encoding_help_text.delete("1.0", "end")
+            self._encoding_help_text.insert("1.0", content)
+            self._encoding_help_text.configure(state="disabled")
+        except tk.TclError:
+            self._encoding_help_text = None
+            self._encoding_help_window = None
+
+    def _close_encoding_help(self) -> None:
+        window = self._encoding_help_window
+        self._encoding_help_window = None
+        self._encoding_help_text = None
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
     def _container_key(self) -> str:
         return CONTAINER_LABELS.get(self.container_var.get(), self._default_container_key)
 
@@ -706,7 +1003,16 @@ class StreamCopyRemuxerApp:
         for path in accepted:
             self._item_counter += 1
             item_id = f"item-{self._item_counter:06d}"
-            item = BatchItem(item_id=item_id, source=path, container_key=self._default_container_key)
+            encoding_key = self._default_video_encoding_key
+            container_key = effective_container_key(encoding_key, self._default_container_key)
+            selected_quality = resolve_quality(encoding_key, self._default_quality_value)
+            item = BatchItem(
+                item_id=item_id,
+                source=path,
+                container_key=container_key,
+                video_encoding_key=encoding_key,
+                quality_value=selected_quality,
+            )
             self.items[item_id] = item
             self._item_order.append(item_id)
             self.queue_tree.insert("", "end", iid=item_id, values=self._row_values(item), tags=(item.state,))
@@ -766,15 +1072,51 @@ class StreamCopyRemuxerApp:
             input_container_summary(media) if media else ("Invalid" if item.state == STATE_INVALID else "Inspecting…"),
             codec_summary(media, "video") if media else "—",
             codec_summary(media, "audio") if media else "—",
+            self._output_video_text(item),
             CONTAINER_PROFILES[item.container_key].label,
             self._compatibility_text(item),
             item.detail,
         )
 
+    def _output_video_text(self, item: BatchItem) -> str:
+        if item.video_encoding_key == COPY_PROFILE_KEY:
+            return "Stream copy (unchanged)"
+        if item.media is None:
+            return profile_for(item.video_encoding_key).label
+        try:
+            resolved = tuple(
+                resolve_video_encoding(
+                    stream,
+                    item.video_encoding_key,
+                    item.quality_value,
+                    output_video_index=index,
+                )
+                for index, stream in enumerate(item.media.video_streams)
+            )
+        except EncodingError as exc:
+            return f"Cannot resolve: {exc}"
+        if not resolved:
+            return "No video stream"
+        first = resolved[0]
+        quality = (
+            f" {first.quality_name} {first.quality_value}" if first.quality_name else ""
+        )
+        extra = f" (+{len(resolved) - 1} video)" if len(resolved) > 1 else ""
+        return f"{first.label}{quality} · {first.expected_pixel_format}{extra}"
+
     def _compatibility_text(self, item: BatchItem) -> str:
         if item.media is None:
             return "Inspection failed" if item.state == STATE_INVALID else "Inspecting…"
-        notes = compatibility_notes(item.media, item.container_key, self._stream_mode())
+        try:
+            notes = compatibility_notes(
+                item.media,
+                item.container_key,
+                self._stream_mode(),
+                item.video_encoding_key,
+                item.quality_value,
+            )
+        except EncodingError as exc:
+            return f"Cannot plan video output: {exc}"
         return " • ".join(notes) if notes else "Preflight will verify this codec/container combination."
 
     def _update_row(self, item: BatchItem) -> None:
@@ -813,21 +1155,39 @@ class StreamCopyRemuxerApp:
     def _selection_changed(self) -> None:
         selected = [self.items[item_id] for item_id in self.queue_tree.selection() if item_id in self.items]
         if selected:
+            encoding_keys = {item.video_encoding_key for item in selected}
+            if len(encoding_keys) == 1:
+                encoding_key = next(iter(encoding_keys))
+                self.encoding_var.set(ENCODING_LABEL_BY_KEY[encoding_key])
+                self._default_video_encoding_key = encoding_key
+                qualities = {item.quality_value for item in selected}
+                if len(qualities) == 1 and next(iter(qualities)) is not None:
+                    quality = next(iter(qualities))
+                    assert quality is not None
+                    self.quality_var.set(str(quality))
+                    self._default_quality_value = quality
             keys = {item.container_key for item in selected}
             if len(keys) == 1:
                 key = next(iter(keys))
                 self.container_var.set(CONTAINER_PROFILES[key].label)
-                self._default_container_key = key
+                if encoding_keys == {COPY_PROFILE_KEY}:
+                    self._default_container_key = key
+        self._update_encoding_controls()
         self._update_controls()
 
     def _container_changed(self) -> None:
         if self._worker and self._worker.is_alive():
+            return
+        if profile_for(self._encoding_key()).fixed_container_key:
+            self._update_encoding_controls()
             return
         key = self._container_key()
         self._default_container_key = key
         selected_ids = [item_id for item_id in self.queue_tree.selection() if item_id in self.items]
         for item_id in selected_ids:
             item = self.items[item_id]
+            if item.video_encoding_key != COPY_PROFILE_KEY:
+                continue
             item.container_key = key
             item.result = None
             if item.media is not None:
@@ -841,6 +1201,7 @@ class StreamCopyRemuxerApp:
     def _stream_mode_changed(self) -> None:
         for item in self.items.values():
             self._update_row(item)
+        self._refresh_encoding_help()
 
     def remove_selected(self, _event: tk.Event[tk.Misc] | None = None) -> str:
         if self._worker and self._worker.is_alive():
@@ -901,11 +1262,16 @@ class StreamCopyRemuxerApp:
                 continue
             if item.media is None or item.output is None:
                 raise PlanError(f"{item.source.name} does not have a valid inspected source and output.")
+            available, availability = encoder_availability(self.toolchain, item.video_encoding_key)
+            if not available:
+                raise PlanError(f"{item.source.name}: {availability}")
             plan = build_remux_plan(
                 item.media,
                 item.output,
                 item.container_key,
                 self._stream_mode(),
+                video_encoding_key=item.video_encoding_key,
+                quality=item.quality_value,
                 enforce_space=False,
             )
             plan_records.append((item_id, plan))
@@ -918,6 +1284,8 @@ class StreamCopyRemuxerApp:
         total_bytes = sum(plan.source_probe.size for _item_id, plan in plans)
         containers = Counter(plan.profile.label for _item_id, plan in plans)
         container_text = ", ".join(f"{label}: {count}" for label, count in sorted(containers.items()))
+        encodings = Counter(profile_for(plan.video_encoding_key).label for _item_id, plan in plans)
+        encoding_text = ", ".join(f"{label}: {count}" for label, count in sorted(encodings.items()))
         examples = [f"• {plan.source_probe.path.name} → {plan.output.name}" for _item_id, plan in plans[:6]]
         if len(plans) > 6:
             examples.append(f"• …and {len(plans) - 6} more")
@@ -931,20 +1299,38 @@ class StreamCopyRemuxerApp:
             omission_lines = omission_lines[:6] + [f"• …and {omitted_file_count - 6} more file(s)"]
         omission_text = ""
         if omission_lines:
+            copy_only = all(plan.is_stream_copy for _item_id, plan in plans)
             omission_text = (
-                "\n\nIntentional omissions (listed tracks only; no re-encoding):\n"
+                "\n\nIntentional omissions (listed tracks)"
+                + (" (selected streams are not re-encoded)" if copy_only else "")
+                + ":\n"
                 + "\n".join(omission_lines)
             )
         destination = self._destination_directory()
         destination_text = str(destination) if destination is not None else "Beside each source"
+        copy_only = all(plan.is_stream_copy for _item_id, plan in plans)
+        lossy_count = sum(not plan.is_stream_copy for _item_id, plan in plans)
+        prompt = (
+            f"Stream-copy {len(plans)} file(s) sequentially without re-encoding?"
+            if copy_only
+            else f"Process {len(plans)} file(s) sequentially, including {lossy_count} lossy video transcode(s)?"
+        )
+        lossy_notice = (
+            "\n\nImportant: transcoding modes decode and re-encode video and are lossy. "
+            "Selected non-video streams remain copied."
+            if lossy_count
+            else ""
+        )
         return (
-            f"Stream-copy {len(plans)} file(s) sequentially without re-encoding?\n\n"
+            f"{prompt}\n\n"
             f"Input size: {format_bytes(total_bytes)}\n"
+            f"Video output: {encoding_text}\n"
             f"Outputs: {container_text}\n"
             f"Destination: {destination_text}\n"
             f"Streams: {STREAM_MODE_CONFIRMATION_LABELS[self._stream_mode()]}\n\n"
             + "\n".join(examples)
             + omission_text
+            + lossy_notice
             + "\n\nExisting files are never overwritten. A failed file will not stop later queue items."
         )
 
@@ -958,12 +1344,18 @@ class StreamCopyRemuxerApp:
             messagebox.showerror("Inspection in progress", "Wait for all added files to finish inspection.", parent=self.root)
             return
         try:
+            resolve_quality(self._encoding_key(), self.quality_var.get())
+        except EncodingError as exc:
+            messagebox.showerror("Invalid CRF/CQ", str(exc), parent=self.root)
+            self.quality_entry.focus_set()
+            return
+        try:
             plans = self._build_batch_plans()
         except (PlanError, OSError) as exc:
             messagebox.showerror("Cannot start batch", str(exc), parent=self.root)
             return
         if not messagebox.askokcancel(
-            "Confirm batch stream copy",
+            "Confirm batch media operation",
             self._confirmation_text(plans),
             parent=self.root,
             icon="info",
@@ -973,12 +1365,28 @@ class StreamCopyRemuxerApp:
         self._cancel_event = threading.Event()
         self.last_results = []
         self._clear_log()
-        self._append_log("Batch method: sequential FFmpeg -c copy (no re-encoding)")
+        methods = {plan.video_encoding_key for _item_id, plan in plans}
+        if methods == {COPY_PROFILE_KEY}:
+            self._append_log("Batch method: sequential FFmpeg -c copy (no re-encoding)")
+        else:
+            self._append_log(
+                "Batch method: sequential FFmpeg media operations; transcoding modes re-encode video lossily, "
+                "while selected non-video streams use -c copy."
+            )
+            for _item_id, plan in plans:
+                if not plan.is_stream_copy:
+                    resolved = "; ".join(
+                        f"source #{item.source_stream_index}: {item.label}, {item.expected_pixel_format}, "
+                        f"{item.quality_name} {item.quality_value}".rstrip()
+                        for item in plan.resolved_video_encodings
+                    )
+                    self._append_log(f"{plan.source_probe.path.name}: lossy video transcode — {resolved}")
         for _item_id, plan in plans:
             if plan.omitted_source_streams:
                 self._append_log(
                     f"{plan.source_probe.path.name}: intentionally omitting for {plan.profile.label}: "
-                    f"{describe_streams(plan.omitted_source_streams)}. No stream will be re-encoded."
+                    f"{describe_streams(plan.omitted_source_streams)}."
+                    + (" No selected stream will be re-encoded." if plan.is_stream_copy else "")
                 )
         for item_id, _plan in plans:
             item = self.items[item_id]
@@ -1025,7 +1433,7 @@ class StreamCopyRemuxerApp:
                 summary.total,
             )
 
-        self._worker = threading.Thread(target=work, name="batch-remux-worker", daemon=True)
+        self._worker = threading.Thread(target=work, name="batch-media-worker", daemon=True)
         self._worker.start()
 
     def _batch_controller_failed(self, exc: Exception) -> None:
@@ -1079,7 +1487,7 @@ class StreamCopyRemuxerApp:
         item.detail = text.replace("…", "...")
         self._update_row(item)
         self.status_var.set(f"File {index} of {total}: {item.source.name} — {text}")
-        if "Stream-copying" in text:
+        if "Stream-copying" in text or "Transcoding" in text:
             self.progress.stop()
             self.progress.configure(mode="determinate", value=0)
 
@@ -1095,7 +1503,7 @@ class StreamCopyRemuxerApp:
                 self.progress.stop()
                 self.progress.configure(mode="determinate")
             self.progress["value"] = update.percent
-            if update.phase == "remux":
+            if update.phase in {"remux", "transcode"}:
                 self.items[item_id].detail = f"Processing {update.percent:.0f}%"
                 self._update_row(self.items[item_id])
         pieces = [f"File {index}/{total}", f"Elapsed {format_duration(update.elapsed_seconds)}"]
@@ -1183,12 +1591,13 @@ class StreamCopyRemuxerApp:
             self.clear_button,
         ):
             widget.configure(state=normal)
-        self.container_combo.configure(state=readonly)
+        self.encoding_combo.configure(state=readonly)
         self.stream_combo.configure(state=readonly)
         self.destination_entry.configure(state=normal)
         self.destination_browse_button.configure(state=normal)
         self.destination_clear_button.configure(state=normal)
         self.cancel_button.configure(state="normal" if running else "disabled")
+        self._update_encoding_controls()
         self._update_ffmpeg_action()
         self._update_controls(running=running)
 
@@ -1207,6 +1616,9 @@ class StreamCopyRemuxerApp:
         self.destination_clear_button.configure(
             state="normal" if not running and bool(self.destination_var.get().strip()) else "disabled"
         )
+        self.encoding_combo.configure(state="disabled" if running else "readonly")
+        self.stream_combo.configure(state="disabled" if running else "readonly")
+        self._update_encoding_controls()
         selected_result = any(
             self.items[item_id].result is not None
             for item_id in self.queue_tree.selection()
@@ -1218,7 +1630,7 @@ class StreamCopyRemuxerApp:
 
     def cancel(self) -> None:
         if self._cancel_event is not None:
-            self.status_var.set("Canceling the active file and removing its partial output…")
+            self.status_var.set("Canceling the active media operation and removing its partial output…")
             self.cancel_button.configure(state="disabled")
             self._cancel_event.set()
 
@@ -1325,6 +1737,7 @@ class StreamCopyRemuxerApp:
         self._destroy()
 
     def _destroy(self) -> None:
+        self._close_encoding_help()
         self.file_drop.close()
         if self._install_cancel_event is not None:
             self._install_cancel_event.set()
@@ -1514,7 +1927,7 @@ def run_withdrawn_gui_self_test(
                 for item in app.items.values()
             ),
             "compatibility_column_populated": all(
-                bool(app.queue_tree.item(item_id, "values")[5]) for item_id in app.items
+                bool(app.queue_tree.item(item_id, "values")[6]) for item_id in app.items
             ),
         }
         with tempfile.TemporaryDirectory(prefix="stream-copy-remuxer-destination-test-") as folder:
@@ -1594,18 +2007,121 @@ def run_withdrawn_gui_self_test(
         app.stream_mode_var.set(next(iter(STREAM_MODE_LABELS)))
         app._stream_mode_changed()
         app.queue_tree.selection_set(tuple(app.items))
+
+        app.container_var.set("AVI")
+        app._container_changed()
+        queue_checks["avi_stream_copy_applies_to_selected_rows"] = all(
+            item.video_encoding_key == COPY_PROFILE_KEY
+            and item.container_key == "avi"
+            and item.output is not None
+            and item.output.suffix == ".avi"
+            for item in app.items.values()
+        )
+        app.container_var.set("MP4")
+        app._container_changed()
+
+        app.encoding_var.set(ENCODING_LABEL_BY_KEY[H264_SOFTWARE_PROFILE_KEY])
+        app._encoding_changed()
+        queue_checks["x264_profile_applies_to_selected_rows"] = all(
+            item.video_encoding_key == H264_SOFTWARE_PROFILE_KEY
+            and item.container_key == "mp4"
+            and item.output is not None
+            and item.output.stem.startswith(item.source.stem + "_h264_x264")
+            for item in app.items.values()
+        )
+        queue_checks["quality_controls_visible_for_crf_profile"] = (
+            app.quality_label.winfo_manager() == "grid"
+            and app.quality_entry.winfo_manager() == "grid"
+            and int(app.encoding_combo.grid_info()["columnspan"]) == 3
+        )
+        app.quality_var.set("17")
+        app._quality_changed()
+        queue_checks["crf_applies_to_selected_rows"] = all(
+            item.quality_value == 17 for item in app.items.values()
+        )
+        app.quality_var.set("not-a-number")
+        app._quality_changed()
+        queue_checks["invalid_quality_is_rejected_without_changing_rows"] = (
+            "Quality input error" in app.status_var.get()
+            and all(item.quality_value == 17 for item in app.items.values())
+        )
+        app.quality_var.set("17")
+        app.encoding_var.set(ENCODING_LABEL_BY_KEY[PRORES_PROFILE_KEY])
+        app._encoding_changed()
+        queue_checks["prores_forces_mov_and_source_aware_resolution"] = all(
+            item.video_encoding_key == PRORES_PROFILE_KEY
+            and item.container_key == "mov"
+            and "ProRes" in app._output_video_text(item)
+            for item in app.items.values()
+        ) and str(app.container_combo.cget("state")) == "disabled"
+        queue_checks["quality_controls_hidden_for_prores"] = (
+            app.quality_label.winfo_manager() == ""
+            and app.quality_entry.winfo_manager() == ""
+            and int(app.encoding_combo.grid_info()["columnspan"]) == 5
+        )
+        app.encoding_var.set(ENCODING_LABEL_BY_KEY[COPY_PROFILE_KEY])
+        app._encoding_changed()
+        queue_checks["stream_copy_restored_after_profile_tests"] = all(
+            item.video_encoding_key == COPY_PROFILE_KEY
+            and item.container_key == "mp4"
+            and item.output is not None
+            and item.output.stem.startswith(item.source.stem + "_remux")
+            for item in app.items.values()
+        )
+        queue_checks["quality_controls_hidden_for_stream_copy"] = (
+            app.quality_label.winfo_manager() == ""
+            and app.quality_entry.winfo_manager() == ""
+            and int(app.encoding_combo.grid_info()["columnspan"]) == 5
+        )
         app.remove_selected()
         queue_checks["delete_key_removes_rows"] = not app.items
 
+    app.show_encoding_help()
+    help_window = app._encoding_help_window
+    help_widget = app._encoding_help_text
+    help_content = help_widget.get("1.0", "end") if help_widget is not None else ""
+    first_help_window_id = str(help_window) if help_window is not None else ""
+    app.show_encoding_help()
+    checks_help = {
+        "encoding_help_window_created": bool(help_window and help_window.winfo_exists()),
+        "encoding_help_window_reused": (
+            app._encoding_help_window is help_window
+            and str(app._encoding_help_window) == first_help_window_id
+        ),
+        "encoding_help_is_high_contrast": (
+            help_window is not None
+            and str(help_window.cget("background")).lower() == "#0b1724"
+            and help_widget is not None
+            and str(help_widget.cget("background")).lower() == "#08131e"
+        ),
+        "encoding_help_covers_profiles_and_quality": all(
+            phrase in help_content
+            for phrase in (
+                "ProRes — source-aware MOV",
+                "DNxHR — source-aware MOV",
+                "H.264 x264",
+                "H.264 NVENC",
+                "HEVC x265",
+                "HEVC NVENC",
+                "AV1 SVT-AV1",
+                "AV1 NVENC",
+                "CRF / CQ GUIDE",
+                "lower",
+                "lossy",
+            )
+        ),
+    }
+    app._close_encoding_help()
+
     texts = _widget_texts(root)
     expected_columns = (
-        "source", "input_container", "video", "audio", "output_container", "compatibility", "status",
+        "source", "input_container", "video", "audio", "output_video", "output_container", "compatibility", "status",
     )
     layout = _layout_metrics(app)
     checks = {
         "window_title": root.title().startswith("Stream Copy Remuxer"),
         "minimum_width": root.minsize()[0] <= 1920,
-        "minimum_height": root.winfo_reqheight() <= 950,
+        "minimum_height": root.minsize()[1] <= 950,
         "event_loop_responsive": event_seen["value"],
         "exact_description": app.description_var.get() == DESCRIPTION,
         "description_one_line": bool(layout["description_one_line"]),
@@ -1619,6 +2135,15 @@ def run_withdrawn_gui_self_test(
         "queue_columns": tuple(app.queue_tree.cget("columns")) == expected_columns,
         "planned_output_column_absent": "output" not in tuple(app.queue_tree.cget("columns")),
         "mp4_default": app.container_var.get() == "MP4" and app._default_container_key == "mp4",
+        "avi_stream_copy_container_available": "AVI" in tuple(app.container_combo.cget("values")),
+        "stream_copy_default": (
+            app._encoding_key() == COPY_PROFILE_KEY
+            and app._default_video_encoding_key == COPY_PROFILE_KEY
+        ),
+        "encoding_help_present": (
+            str(app.encoding_help_button.cget("text")) == "Encoding help"
+            and len(ENCODING_LABELS) >= 9
+        ),
         "delete_key_bound": bool(app.queue_tree.bind("<Delete>")),
         "legacy_output_controls_absent": not any(
             text in {"Set output…", "Change FFmpeg…"}
@@ -1648,6 +2173,7 @@ def run_withdrawn_gui_self_test(
         "start_disabled_without_files": str(app.start_button.cget("state")) == "disabled",
         "cancel_disabled_when_idle": str(app.cancel_button.cget("state")) == "disabled",
         "toolchain_displayed": bool(app.tool_var.get()),
+        **checks_help,
         **queue_checks,
     }
     drop_error = app.file_drop.error

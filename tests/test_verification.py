@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from stream_copy_remuxer.encoding import H264_SOFTWARE_PROFILE_KEY, resolve_video_encoding
 from stream_copy_remuxer.models import StreamInfo
 from stream_copy_remuxer.verification import verify_remux
 
@@ -151,6 +152,71 @@ class VerificationTests(unittest.TestCase):
         source = make_probe(self.source_path, streams=(video_stream(),), chapters=3)
         output = make_probe(self.output_path, streams=(video_stream(frame_count=250),), chapters=0)
         self.assertFalse(verify_remux(source, output, stream_mode="av", container_key="mp4").passed)
+
+    def test_transcode_verification_accepts_planned_video_and_copied_audio(self) -> None:
+        source = make_probe(self.source_path, streams=(video_stream(), audio_stream()))
+        encoded_video = StreamInfo(
+            index=0,
+            codec_type="video",
+            codec_name="h264",
+            profile="High",
+            width=1920,
+            height=1080,
+            pixel_format="yuv420p",
+            frame_rate="25/1",
+            duration=10.0,
+        )
+        output = make_probe(self.output_path, streams=(encoded_video, audio_stream()))
+        resolved = (
+            resolve_video_encoding(
+                source.video_streams[0],
+                H264_SOFTWARE_PROFILE_KEY,
+                17,
+            ),
+        )
+        result = verify_remux(
+            source,
+            output,
+            stream_mode="av",
+            container_key="mp4",
+            resolved_video_encodings=resolved,
+        )
+        self.assertTrue(result.passed, result)
+        self.assertTrue(
+            any(check.name == "copied non-video stream codecs and core properties" for check in result.checks)
+        )
+
+    def test_transcode_verification_rejects_unplanned_pixel_format(self) -> None:
+        source = make_probe(self.source_path, streams=(video_stream(), audio_stream()))
+        encoded_video = StreamInfo(
+            index=0,
+            codec_type="video",
+            codec_name="h264",
+            profile="High",
+            width=1920,
+            height=1080,
+            pixel_format="yuv444p",
+            frame_rate="25/1",
+            duration=10.0,
+        )
+        output = make_probe(self.output_path, streams=(encoded_video, audio_stream()))
+        result = verify_remux(
+            source,
+            output,
+            stream_mode="av",
+            container_key="mp4",
+            resolved_video_encodings=(
+                resolve_video_encoding(
+                    source.video_streams[0],
+                    H264_SOFTWARE_PROFILE_KEY,
+                    17,
+                ),
+            ),
+        )
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any(check.name == "transcoded video stream 0" and not check.passed for check in result.checks)
+        )
 
 
 if __name__ == "__main__":
