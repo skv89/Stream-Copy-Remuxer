@@ -1,26 +1,26 @@
-# Stream Copy Remuxer 1.6.0
+# Stream Copy Remuxer 1.6.1
 
 Certain software such as Topaz Video are more or less compatible with different containers. Stream Copy Remuxer changes containers without re-encoding video or audio and also offers optional compatibility-focused video transcoding profiles.
 
 ## Download
 
-[Download Stream Copy Remuxer.exe](https://github.com/skv89/Stream-Copy-Remuxer/raw/refs/tags/v1.6.0/Stream%20Copy%20Remuxer.exe)
+[Download Stream Copy Remuxer.exe](https://github.com/skv89/Stream-Copy-Remuxer/raw/refs/tags/v1.6.1/Stream%20Copy%20Remuxer.exe)
 
-[View the v1.6.0 release notes](https://github.com/skv89/Stream-Copy-Remuxer/releases/tag/v1.6.0)
+[View the v1.6.1 release notes](https://github.com/skv89/Stream-Copy-Remuxer/releases/tag/v1.6.1)
 
 Only compiled portable application artifacts are distributed. Application source, tests, requirements, build scripts, and internal development records are not published.
 
 The executable keeps the stable filename `Stream Copy Remuxer.exe` across releases so existing shortcuts continue to work. The primary download is stored directly in the source-free release tag to preserve that exact filename.
 
-SHA-256: `9D1BA3D5299DE7340F6F8772FE56EB380819117AA5798B6598D15730E2B7A581`
+SHA-256: `D527483970AF08A83728FA26C88384B793CE78D59FFE939E13211CA7C78B24AE`
 
-## What's new in 1.6.0
+## What's new in 1.6.1
 
-- Source-aware FFV1 version 3 output that preserves decoded bit depth, chroma, and alpha when the detected FFmpeg supports the source format.
-- Every FFV1 frame is independently seekable with `-g 1`; 16 CRC-protected slices improve corruption localization and parallel decoding.
-- Exact FFV1 options: `-level 3 -coder 2 -context 1 -g 1 -slicecrc 1 -slices 16`.
-- MKV is the default FFV1 container; MOV, MP4, and AVI are also selectable.
-- Updated selection summaries, compatibility guidance, confirmation text, and encoding help while preserving all existing stream-copy and transcoding modes.
+- Fixes a false FFV1 preflight failure for variable- or irregular-frame-rate sources when a short preflight sample has a different whole-file average frame rate.
+- Full output verification still validates the complete output cadence and timeline after encoding.
+- Retains source-aware FFV1 version 3 output with exact options `-level 3 -coder 2 -context 1 -g 1 -slicecrc 1 -slices 16`.
+- Retains MKV as the default FFV1 container, with MOV, MP4, and AVI also selectable.
+- Preserves decoded bit depth, chroma, and alpha when supported, while retaining all existing stream-copy and transcoding modes.
 
 ## Screenshots
 
