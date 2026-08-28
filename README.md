@@ -4,11 +4,13 @@ Certain software such as Topaz Video are more or less compatible with different 
 
 ## Download
 
-[Download the portable Windows release](https://github.com/skv89/Stream-Copy-Remuxer/releases/tag/v1.6.0)
+[Download Stream Copy Remuxer.exe](https://github.com/skv89/Stream-Copy-Remuxer/raw/refs/tags/v1.6.0/Stream%20Copy%20Remuxer.exe)
+
+[View the v1.6.0 release notes](https://github.com/skv89/Stream-Copy-Remuxer/releases/tag/v1.6.0)
 
 Only compiled portable application artifacts are distributed. Application source, tests, requirements, build scripts, and internal development records are not published.
 
-The executable keeps the stable filename `Stream Copy Remuxer.exe` across releases so existing shortcuts continue to work.
+The executable keeps the stable filename `Stream Copy Remuxer.exe` across releases so existing shortcuts continue to work. The primary download is stored directly in the source-free release tag to preserve that exact filename.
 
 SHA-256: `9D1BA3D5299DE7340F6F8772FE56EB380819117AA5798B6598D15730E2B7A581`
 
